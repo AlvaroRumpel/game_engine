@@ -76,6 +76,7 @@ static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
   char line3[256];
   char line4[256];
   char line5[256];
+  char line6[256];
   std::snprintf(line1, sizeof(line1), "[%s] FPS: %.1f  Frame: %.2f ms", sceneName, fps, ms);
   std::snprintf(line2, sizeof(line2), "Draws: %u  Sprites: %u  Batches: %u",
                 stats.rectDraws + stats.spriteDraws, stats.spriteDraws, stats.spriteBatches);
@@ -87,12 +88,14 @@ static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
                 engine.input().mouseX(), engine.input().mouseY(), wx, wy);
   std::snprintf(line4, sizeof(line4), "Camera: %.1f,%.1f  Zoom: %.2f", cam.x, cam.y, cam.zoom);
   std::snprintf(line5, sizeof(line5), "Collisions: %d  ActivePairs: %d", physics.collisions, physics.activePairs);
+  std::snprintf(line6, sizeof(line6), "Manifest: %s", engine.assets().manifestLoaded() ? "OK" : "MISSING");
 
   engine.renderer().drawText(font, line1, 10, 10, 255, 255, 255, 255);
   engine.renderer().drawText(font, line2, 10, 32, 200, 200, 200, 255);
   engine.renderer().drawText(font, line3, 10, 54, 200, 200, 200, 255);
   engine.renderer().drawText(font, line4, 10, 76, 200, 200, 200, 255);
   engine.renderer().drawText(font, line5, 10, 98, 200, 200, 200, 255);
+  engine.renderer().drawText(font, line6, 10, 120, 200, 200, 200, 255);
 }
 
 class DemoScene : public IScene
@@ -107,9 +110,9 @@ public:
     e.transform.x = 100;
     e.transform.y = 100;
 
-    font_ = engine.assets().loadFont("assets/Roboto-Regular.ttf", 20);
+    font_ = engine.assets().loadFontById("ui_font");
 
-    e.sprite.texture = engine.assets().loadTexture("assets/player.png");
+    e.sprite.texture = engine.assets().loadTextureById("player");
     e.sprite.enabled = true;
     e.sprite.scale = 1.0f;
 
@@ -202,7 +205,7 @@ public:
     e.transform.x = 100;
     e.transform.y = 100;
 
-    font_ = engine.assets().loadFont("assets/Roboto-Regular.ttf", 20);
+    font_ = engine.assets().loadFontById("ui_font");
 
     e.rect.w = 40;
     e.rect.h = 40;

@@ -17,6 +17,7 @@ add_executable(game_engine
     src/Input/Input.cpp
     src/Time/Time.cpp
     src/Assets/AssetManager.cpp
+    src/Assets/AssetManifest.cpp
     src/World/Scene.cpp
     src/World/Tilemap.cpp
     src/Systems/RenderSystem.cpp

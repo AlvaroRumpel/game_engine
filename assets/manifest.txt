@@ -1,0 +1,7 @@
+# Simple asset manifest
+# format:
+# texture <id> <path>
+# font <id> <path> <size>
+
+texture player assets/player.png
+font ui_font assets/Roboto-Regular.ttf 20

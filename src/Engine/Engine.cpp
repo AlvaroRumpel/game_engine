@@ -178,6 +178,7 @@ bool Engine::init()
     renderer_ = std::move(sdlBackend);
 
     assets_ = std::make_unique<AssetManager>(*backendRenderer_);
+    assets_->loadManifest("assets/manifest.txt");
 
     input_.setAxisMapping("MoveX", AxisMapping{
                                        /*positive*/ {Key::D, Key::Right},

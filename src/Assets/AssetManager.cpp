@@ -1,4 +1,5 @@
 #include "AssetManager.h"
+#include "AssetManifest.h"
 #include "Texture.h"
 #include "Font.h"
 #include "../Renderer/SDLRenderer.h"
@@ -47,6 +48,45 @@ AssetManager::~AssetManager()
     IMG_Quit();
 }
 
+bool AssetManager::loadManifest(const std::string &path)
+{
+    if (!manifest_)
+        manifest_ = std::make_unique<AssetManifest>();
+
+    manifestPath_ = path;
+    manifestLoaded_ = manifest_->loadFromFile(path);
+    manifestLastWrite_ = SafeLastWrite(path);
+    return manifestLoaded_;
+}
+
+std::shared_ptr<Texture> AssetManager::loadTextureById(const std::string &id)
+{
+    auto it = texturesById_.find(id);
+    if (it != texturesById_.end())
+        return it->second;
+
+    if (!manifest_)
+    {
+        std::printf("AssetManager: manifest not loaded (texture id '%s')\n", id.c_str());
+        return nullptr;
+    }
+
+    const std::string *path = manifest_->texturePath(id);
+    if (!path)
+    {
+        std::printf("AssetManager: texture id '%s' not found in manifest\n", id.c_str());
+        return nullptr;
+    }
+
+    auto tex = loadTexture(*path);
+    if (tex)
+    {
+        texturesById_[id] = tex;
+        texturePathById_[id] = *path;
+    }
+    return tex;
+}
+
 std::shared_ptr<Texture> AssetManager::loadTexture(const std::string &path)
 {
     auto it = textures_.find(path);
@@ -82,6 +122,34 @@ std::shared_ptr<Texture> AssetManager::loadTexture(const std::string &path)
 
     textures_[path] = tex;
     return tex;
+}
+
+std::shared_ptr<Font> AssetManager::loadFontById(const std::string &id)
+{
+    auto it = fontsById_.find(id);
+    if (it != fontsById_.end())
+        return it->second;
+
+    if (!manifest_)
+    {
+        std::printf("AssetManager: manifest not loaded (font id '%s')\n", id.c_str());
+        return nullptr;
+    }
+
+    const FontDef *def = manifest_->fontDef(id);
+    if (!def)
+    {
+        std::printf("AssetManager: font id '%s' not found in manifest\n", id.c_str());
+        return nullptr;
+    }
+
+    auto font = loadFont(def->path, def->size);
+    if (font)
+    {
+        fontsById_[id] = font;
+        fontDefById_[id] = *def;
+    }
+    return font;
 }
 
 std::shared_ptr<Font> AssetManager::loadFont(const std::string &path, int ptSize)
@@ -127,6 +195,8 @@ void AssetManager::clear()
         }
     }
     textures_.clear();
+    texturesById_.clear();
+    texturePathById_.clear();
 
     // destruir fontes
     for (auto &kv : fonts_)
@@ -141,6 +211,8 @@ void AssetManager::clear()
         }
     }
     fonts_.clear();
+    fontsById_.clear();
+    fontDefById_.clear();
 }
 
 bool AssetManager::reloadTextureInPlace(Texture &tex)
@@ -176,6 +248,48 @@ bool AssetManager::reloadTextureInPlace(Texture &tex)
     return true;
 }
 
+bool AssetManager::reloadTextureFromPath(Texture &tex, const std::string &newPath, const std::shared_ptr<Texture> &handle)
+{
+    SDL_Surface *surf = IMG_Load(newPath.c_str());
+    if (!surf)
+    {
+        std::printf("HotReload IMG_Load failed '%s': %s\n", newPath.c_str(), IMG_GetError());
+        return false;
+    }
+
+    SDL_Texture *newTex = SDL_CreateTextureFromSurface(renderer_.native(), surf);
+    if (!newTex)
+    {
+        std::printf("HotReload CreateTexture failed: %s\n", SDL_GetError());
+        SDL_FreeSurface(surf);
+        return false;
+    }
+
+    SDL_FreeSurface(surf);
+
+    if (tex.native_)
+        SDL_DestroyTexture(tex.native_);
+    tex.native_ = newTex;
+
+    int w = 0, h = 0;
+    SDL_QueryTexture(tex.native_, nullptr, nullptr, &w, &h);
+    tex.width_ = w;
+    tex.height_ = h;
+
+    std::string oldPath = tex.path_;
+    tex.path_ = newPath;
+    tex.lastWrite_ = SafeLastWrite(newPath);
+
+    if (oldPath != newPath)
+    {
+        textures_.erase(oldPath);
+        textures_[newPath] = handle;
+    }
+
+    std::printf("HotReload texture path OK: %s\n", newPath.c_str());
+    return true;
+}
+
 bool AssetManager::reloadFontInPlace(Font &font)
 {
     TTF_Font *newFont = TTF_OpenFont(font.path_.c_str(), font.size_);
@@ -190,7 +304,40 @@ bool AssetManager::reloadFontInPlace(Font &font)
     font.native_ = newFont;
 
     font.lastWrite_ = SafeLastWrite(font.path_);
+    renderer_.invalidateTextCache(&font);
     std::printf("HotReload font OK: %s\n", font.path_.c_str());
+    return true;
+}
+
+bool AssetManager::reloadFontFromDef(Font &font, const FontDef &def, const std::shared_ptr<Font> &handle)
+{
+    TTF_Font *newFont = TTF_OpenFont(def.path.c_str(), def.size);
+    if (!newFont)
+    {
+        std::printf("HotReload OpenFont failed '%s': %s\n", def.path.c_str(), TTF_GetError());
+        return false;
+    }
+
+    if (font.native_)
+        TTF_CloseFont(font.native_);
+    font.native_ = newFont;
+
+    std::string oldPath = font.path_;
+    int oldSize = font.size_;
+    font.path_ = def.path;
+    font.size_ = def.size;
+    font.lastWrite_ = SafeLastWrite(def.path);
+    renderer_.invalidateTextCache(&font);
+
+    std::string oldKey = FontKey(oldPath, oldSize);
+    std::string newKey = FontKey(font.path_, font.size_);
+    if (oldKey != newKey)
+    {
+        fonts_.erase(oldKey);
+        fonts_[newKey] = handle;
+    }
+
+    std::printf("HotReload font path OK: %s\n", font.path_.c_str());
     return true;
 }
 
@@ -204,6 +351,49 @@ static bool IsStable(const std::string &path, std::filesystem::file_time_type t)
 }
 void AssetManager::updateHotReload()
 {
+    if (manifest_ && !manifestPath_.empty())
+    {
+        auto now = SafeLastWrite(manifestPath_);
+        if (now != std::filesystem::file_time_type{} && now != manifestLastWrite_ && IsStable(manifestPath_, now))
+        {
+            if (manifest_->loadFromFile(manifestPath_))
+            {
+                manifestLoaded_ = true;
+                manifestLastWrite_ = now;
+
+                for (auto &kv : texturesById_)
+                {
+                    const std::string *path = manifest_->texturePath(kv.first);
+                    if (!path)
+                        continue;
+                    auto itPath = texturePathById_.find(kv.first);
+                    if (itPath == texturePathById_.end() || itPath->second != *path)
+                    {
+                        if (kv.second)
+                            reloadTextureFromPath(*kv.second, *path, kv.second);
+                        texturePathById_[kv.first] = *path;
+                    }
+                }
+
+                for (auto &kv : fontsById_)
+                {
+                    const FontDef *def = manifest_->fontDef(kv.first);
+                    if (!def)
+                        continue;
+                    auto itDef = fontDefById_.find(kv.first);
+                    if (itDef == fontDefById_.end() ||
+                        itDef->second.path != def->path ||
+                        itDef->second.size != def->size)
+                    {
+                        if (kv.second)
+                            reloadFontFromDef(*kv.second, *def, kv.second);
+                        fontDefById_[kv.first] = *def;
+                    }
+                }
+            }
+        }
+    }
+
     for (auto &kv : textures_)
     {
         if (auto t = kv.second.lock())
@@ -221,7 +411,7 @@ void AssetManager::updateHotReload()
         if (auto f = kv.second.lock())
         {
             auto now = SafeLastWrite(f->path_);
-            if (now != fs::file_time_type{} && now != f->lastWrite_)
+            if (now != fs::file_time_type{} && now != f->lastWrite_ && IsStable(f->path_, now))
             {
                 reloadFontInPlace(*f);
             }
