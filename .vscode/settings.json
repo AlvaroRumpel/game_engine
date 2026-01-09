@@ -1,0 +1,8 @@
+{
+  "cmake.configureSettings": {
+    "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+    "VCPKG_TARGET_TRIPLET": "x64-windows"
+  },
+"cmake.generator": "Visual Studio 17 2022",
+"cmake.sourceDirectory": "F:/Alvaro/Desktop/Projetos/game_engine"
+}
