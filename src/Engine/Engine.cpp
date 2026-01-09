@@ -174,6 +174,11 @@ void Engine::tick(float dt)
 
 void Engine::renderWorld(bool includeSceneUI)
 {
+    renderWorld(includeSceneUI, width_, height_);
+}
+
+void Engine::renderWorld(bool includeSceneUI, int viewW, int viewH)
+{
     // Render
     renderer_->beginFrame();
 
@@ -191,7 +196,11 @@ void Engine::renderWorld(bool includeSceneUI)
 
     commandBuffer_.finalize();
 
-    renderer_->setCamera(camera_, width_, height_);
+    if (viewW <= 0)
+        viewW = width_;
+    if (viewH <= 0)
+        viewH = height_;
+    renderer_->setCamera(camera_, viewW, viewH);
     // Executa o command buffer (desenha de fato)
     renderer_->submit(commandBuffer_);
 

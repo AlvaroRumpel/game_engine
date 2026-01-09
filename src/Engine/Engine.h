@@ -37,6 +37,7 @@ public:
 
     void tick(float dt);
     void renderWorld(bool includeSceneUI);
+    void renderWorld(bool includeSceneUI, int viewW, int viewH);
     void present();
 
     Camera2D &camera() { return camera_; }
