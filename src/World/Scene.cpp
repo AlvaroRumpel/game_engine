@@ -34,6 +34,7 @@ void Scene::clear()
     entities_.clear();
     nextEntityId_ = 1;
     tilemaps_.clear();
+    bounds_ = Bounds{};
 }
 
 void Scene::clearEntities()

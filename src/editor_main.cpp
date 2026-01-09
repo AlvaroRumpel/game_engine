@@ -2,6 +2,7 @@
 #include "Engine/Engine.h"
 #include "Game/SandboxScenes.h"
 #include "Assets/Texture.h"
+#include "World/SceneManager.h"
 #include <SDL.h>
 #include <algorithm>
 #include <cstdio>
@@ -16,7 +17,11 @@
 #include "ThirdParty/imgui/backends/imgui_impl_sdl2.h"
 #include "ThirdParty/imgui/backends/imgui_impl_sdlrenderer2.h"
 
-static void DrawFileTree(const std::filesystem::path &root, std::string &selectedPath)
+static std::string ToLower(const std::string &s);
+static bool IsTextureExt(const std::string &ext);
+static void ClampEntityToBounds(const Scene::Bounds &b, Entity &e);
+
+static void DrawFileTree(const std::filesystem::path &root, std::string &selectedPath, bool allowDrag)
 {
     if (!std::filesystem::exists(root))
         return;
@@ -41,7 +46,7 @@ static void DrawFileTree(const std::filesystem::path &root, std::string &selecte
         {
             if (ImGui::TreeNode(name.c_str()))
             {
-                DrawFileTree(path, selectedPath);
+                DrawFileTree(path, selectedPath, allowDrag);
                 ImGui::TreePop();
             }
         }
@@ -50,6 +55,20 @@ static void DrawFileTree(const std::filesystem::path &root, std::string &selecte
             bool selected = (selectedPath == path.string());
             if (ImGui::Selectable(name.c_str(), selected))
                 selectedPath = path.string();
+            if (allowDrag)
+            {
+                std::string ext = ToLower(path.extension().string());
+                if (IsTextureExt(ext))
+                {
+                    if (ImGui::BeginDragDropSource())
+                    {
+                        std::string p = path.string();
+                        ImGui::SetDragDropPayload("ASSET_PATH", p.c_str(), p.size() + 1);
+                        ImGui::Text("Sprite: %s", name.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                }
+            }
         }
     }
 }
@@ -368,6 +387,9 @@ static bool SaveScene(const Scene &scene, const Camera2D &cam, const std::string
 
     out << "{\n";
     out << "  \"camera\": {\"x\": " << cam.x << ", \"y\": " << cam.y << ", \"zoom\": " << cam.zoom << "},\n";
+    out << "  \"bounds\": {\"enabled\": " << (scene.bounds().enabled ? "true" : "false")
+        << ", \"x\": " << scene.bounds().x << ", \"y\": " << scene.bounds().y
+        << ", \"w\": " << scene.bounds().w << ", \"h\": " << scene.bounds().h << "},\n";
     out << "  \"entities\": [\n";
 
     const auto &entities = scene.entities();
@@ -500,6 +522,19 @@ static bool LoadScene(Scene &scene, AssetManager &assets, Camera2D &cam, const s
                 cam.y = ParseFloat(v);
             if (ExtractValue(line, "\"zoom\"", v))
                 cam.zoom = ParseFloat(v);
+        }
+        if (line.find("\"bounds\"") != std::string::npos)
+        {
+            if (ExtractValue(line, "\"enabled\"", v))
+                scene.bounds().enabled = ParseBool(v);
+            if (ExtractValue(line, "\"x\"", v))
+                scene.bounds().x = ParseFloat(v);
+            if (ExtractValue(line, "\"y\"", v))
+                scene.bounds().y = ParseFloat(v);
+            if (ExtractValue(line, "\"w\"", v))
+                scene.bounds().w = ParseFloat(v);
+            if (ExtractValue(line, "\"h\"", v))
+                scene.bounds().h = ParseFloat(v);
         }
 
         if (line.find("{") != std::string::npos && line.find("\"id\"") != std::string::npos)
@@ -661,6 +696,161 @@ static void ApplyEditorStyle()
     colors[ImGuiCol_SeparatorActive] = ImVec4(0.36f, 0.42f, 0.50f, 1.00f);
 }
 
+struct ProjectInfo
+{
+    std::string name;
+    std::string root;
+    std::string scenePath;
+};
+
+static bool WriteProjectFile(const ProjectInfo &proj)
+{
+    std::filesystem::path p = std::filesystem::path(proj.root) / "project.json";
+    std::ofstream out(p.string(), std::ios::trunc);
+    if (!out.is_open())
+        return false;
+    out << "{\n";
+    out << "  \"name\": \"" << proj.name << "\",\n";
+    out << "  \"scene\": \"" << proj.scenePath << "\"\n";
+    out << "}\n";
+    return true;
+}
+
+static bool ReadProjectFile(const std::string &root, ProjectInfo &proj)
+{
+    std::filesystem::path p = std::filesystem::path(root) / "project.json";
+    std::ifstream in(p.string());
+    if (!in.is_open())
+        return false;
+    proj.root = root;
+    proj.name.clear();
+    proj.scenePath.clear();
+    std::string line;
+    while (std::getline(in, line))
+    {
+        std::string v;
+        if (ExtractValue(line, "\"name\"", v))
+        {
+            if (!v.empty() && v.front() == '\"')
+                v.erase(0, 1);
+            if (!v.empty() && v.back() == '\"')
+                v.pop_back();
+            proj.name = v;
+        }
+        if (ExtractValue(line, "\"scene\"", v))
+        {
+            if (!v.empty() && v.front() == '\"')
+                v.erase(0, 1);
+            if (!v.empty() && v.back() == '\"')
+                v.pop_back();
+            proj.scenePath = v;
+        }
+    }
+    return true;
+}
+
+static bool CreateProjectFolders(const std::string &root)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(root) / "assets", ec);
+    std::filesystem::create_directories(std::filesystem::path(root) / "src" / "Scripts", ec);
+    std::filesystem::create_directories(std::filesystem::path(root) / "build", ec);
+    return !ec;
+}
+
+static bool BuildProjectRelease(const std::string &root)
+{
+    std::string buildDir = (std::filesystem::path(root) / "build").string();
+    std::string cmd1 = "cmake -S \"" + root + "\" -B \"" + buildDir + "\"";
+    std::string cmd2 = "cmake --build \"" + buildDir + "\" --config Release";
+    int r1 = std::system(cmd1.c_str());
+    int r2 = std::system(cmd2.c_str());
+    return (r1 == 0 && r2 == 0);
+}
+
+static bool WriteTextFile(const std::string &path, const std::string &content)
+{
+    std::ofstream out(path, std::ios::trunc);
+    if (!out.is_open())
+        return false;
+    out << content;
+    return true;
+}
+
+static bool CreateScriptSkeleton(const std::string &root, const std::string &name, bool openVSCode)
+{
+    if (name.empty())
+        return false;
+    std::filesystem::path dir = std::filesystem::path(root) / "src" / "Scripts";
+    std::filesystem::create_directories(dir);
+    std::filesystem::path hPath = dir / (name + ".h");
+    std::filesystem::path cppPath = dir / (name + ".cpp");
+
+    std::string header =
+        "#pragma once\n"
+        "class Engine;\n"
+        "class " + name + "\n"
+        "{\n"
+        "public:\n"
+        "    void onUpdate(Engine &engine, float dt);\n"
+        "};\n";
+
+    std::string source =
+        "#include \"" + name + ".h\"\n"
+        "#include \"../../Engine/Engine.h\"\n\n"
+        "void " + name + "::onUpdate(Engine &engine, float dt)\n"
+        "{\n"
+        "    (void)engine;\n"
+        "    (void)dt;\n"
+        "}\n";
+
+    bool ok = WriteTextFile(hPath.string(), header) && WriteTextFile(cppPath.string(), source);
+    if (ok && openVSCode)
+    {
+        OpenInVSCode(hPath.string());
+        OpenInVSCode(cppPath.string());
+    }
+    return ok;
+}
+
+static void CreatePrefabScripts(const std::string &root)
+{
+    CreateScriptSkeleton(root, "PlayerMovement", false);
+    CreateScriptSkeleton(root, "CameraFollow", false);
+}
+
+static void CreateEntityFromSprite(Scene &scene, AssetManager &assets, const std::string &path, float wx, float wy)
+{
+    auto tex = assets.loadTexture(path);
+    if (!tex)
+        return;
+    Entity &e = scene.createEntity();
+    e.transform.x = wx;
+    e.transform.y = wy;
+    e.sprite.texture = tex;
+    e.sprite.enabled = true;
+    e.sprite.scale = 1.0f;
+    e.rect.enabled = false;
+    e.collider.enabled = true;
+    e.collider.w = (float)tex->width();
+    e.collider.h = (float)tex->height();
+    ClampEntityToBounds(scene.bounds(), e);
+}
+
+static void ClampEntityToBounds(const Scene::Bounds &b, Entity &e)
+{
+    if (!b.enabled)
+        return;
+    if (e.transform.x < b.x)
+        e.transform.x = b.x;
+    if (e.transform.y < b.y)
+        e.transform.y = b.y;
+    if (e.transform.x > (b.x + b.w))
+        e.transform.x = b.x + b.w;
+    if (e.transform.y > (b.y + b.h))
+        e.transform.y = b.y + b.h;
+}
+
 int main()
 {
     Engine engine;
@@ -726,11 +916,19 @@ int main()
     int camFollowId = 0;
     float camLockX = 0.0f;
     float camLockY = 0.0f;
+    bool camClampToBounds = false;
     bool savedOk = false;
     char savePathBuf[256] = "assets/editor_scene.json";
     bool dockInitialized = false;
     std::vector<EntitySnapshot> playSnapshot;
     Camera2D playSnapshotCam{};
+    SceneManager sceneManager;
+    ProjectInfo project;
+    char projectRootBuf[256] = ".";
+    char projectNameBuf[128] = "MyProject";
+    std::string projectStatus;
+    char scriptNameBuf[64] = "NewScript";
+    bool openScriptAfterCreate = true;
 
     Uint32 lastTicks = SDL_GetTicks();
 
@@ -775,6 +973,8 @@ int main()
 
         engine.tick((playState == PlayState::Playing) ? rawDt : 0.0f);
 
+        Scene &scene = engine.scene();
+
         if (playState != PlayState::Playing)
         {
             Camera2D &cam = engine.camera();
@@ -801,13 +1001,22 @@ int main()
                 cam.x = camLockX;
                 cam.y = camLockY;
             }
+            if (camClampToBounds && scene.bounds().enabled)
+            {
+                if (cam.x < scene.bounds().x)
+                    cam.x = scene.bounds().x;
+                if (cam.y < scene.bounds().y)
+                    cam.y = scene.bounds().y;
+                if (cam.x > scene.bounds().x + scene.bounds().w)
+                    cam.x = scene.bounds().x + scene.bounds().w;
+                if (cam.y > scene.bounds().y + scene.bounds().h)
+                    cam.y = scene.bounds().y + scene.bounds().h;
+            }
         }
 
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-
-        Scene &scene = engine.scene();
 
 #ifdef IMGUI_HAS_DOCK
         ImGuiViewport *viewport = ImGui::GetMainViewport();
@@ -969,11 +1178,85 @@ int main()
         ImGui::SetNextWindowPos(ImVec2(vpPos.x, vpPos.y + 70.0f), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(320.0f, vpSize.y - 220.0f), ImGuiCond_FirstUseEver);
         ImGui::Begin("Project", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::Text("Project");
+        ImGui::InputText("Root", projectRootBuf, sizeof(projectRootBuf));
+        ImGui::InputText("Name", projectNameBuf, sizeof(projectNameBuf));
+        if (ImGui::Button("Create"))
+        {
+            project.root = projectRootBuf;
+            project.name = projectNameBuf;
+            project.scenePath = "assets/editor_scene.json";
+            if (CreateProjectFolders(project.root) && WriteProjectFile(project))
+            {
+                sceneManager.setProjectRoot(project.root);
+                sceneManager.setCurrentScenePath(project.scenePath);
+                std::filesystem::path fullScene = std::filesystem::path(project.root) / project.scenePath;
+                std::snprintf(savePathBuf, sizeof(savePathBuf), "%s", fullScene.string().c_str());
+                projectStatus = "Project created.";
+            }
+            else
+            {
+                projectStatus = "Failed to create project.";
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open"))
+        {
+            ProjectInfo loaded;
+            if (ReadProjectFile(projectRootBuf, loaded))
+            {
+                project = loaded;
+                std::snprintf(projectNameBuf, sizeof(projectNameBuf), "%s", project.name.c_str());
+                sceneManager.setProjectRoot(project.root);
+                sceneManager.setCurrentScenePath(project.scenePath);
+                std::filesystem::path fullScene = std::filesystem::path(project.root) / project.scenePath;
+                std::snprintf(savePathBuf, sizeof(savePathBuf), "%s", fullScene.string().c_str());
+                bool ok = LoadScene(scene, engine.assets(), engine.camera(), savePathBuf);
+                projectStatus = ok ? "Project opened." : "Opened project (scene load failed).";
+            }
+            else
+            {
+                projectStatus = "Project not found.";
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save Project"))
+        {
+            project.root = projectRootBuf;
+            project.name = projectNameBuf;
+            if (project.scenePath.empty())
+                project.scenePath = "assets/editor_scene.json";
+            bool ok = SaveScene(scene, engine.camera(), savePathBuf) && WriteProjectFile(project);
+            projectStatus = ok ? "Project saved." : "Failed to save project.";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Build Release"))
+        {
+            projectStatus = BuildProjectRelease(projectRootBuf) ? "Build OK." : "Build failed.";
+        }
+        ImGui::TextWrapped("%s", projectStatus.c_str());
+        ImGui::Separator();
+        ImGui::Text("Scripts");
+        ImGui::InputText("Script Name", scriptNameBuf, sizeof(scriptNameBuf));
+        ImGui::Checkbox("Open in VSCode", &openScriptAfterCreate);
+        if (ImGui::Button("Create Script"))
+        {
+            std::string root = projectRootBuf;
+            bool ok = CreateScriptSkeleton(root, scriptNameBuf, openScriptAfterCreate);
+            projectStatus = ok ? "Script created." : "Failed to create script.";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Create Prefabs"))
+        {
+            CreatePrefabScripts(projectRootBuf);
+            projectStatus = "Prefab scripts created.";
+        }
+        ImGui::Separator();
         ImGui::Text("assets/");
-        DrawFileTree("assets", selectedPath);
+        DrawFileTree("assets", selectedPath, true);
         ImGui::Separator();
         ImGui::Text("src/");
-        DrawFileTree("src", selectedPath);
+        DrawFileTree("src", selectedPath, false);
         ImGui::Separator();
         ImGui::Text("Selected: %s", selectedPath.empty() ? "-" : selectedPath.c_str());
         if (ImGui::Button("Open in VSCode") && !selectedPath.empty())
@@ -1183,8 +1466,8 @@ int main()
             gameViewHovered = ImGui::IsItemHovered();
             gameViewFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
-        if (gameViewHovered)
-        {
+            if (gameViewHovered)
+            {
             ImVec2 mousePos = ImGui::GetMousePos();
             float localX = mousePos.x - imgMin.x;
             float localY = mousePos.y - imgMin.y;
@@ -1212,6 +1495,19 @@ int main()
                         cam.zoom = 0.1f;
                 }
             }
+        }
+
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload *payload = ImGui::AcceptDragDropPayload("ASSET_PATH"))
+            {
+                const char *path = (const char *)payload->Data;
+                if (path && haveMouseWorld)
+                {
+                    CreateEntityFromSprite(scene, engine.assets(), path, mouseWorldX, mouseWorldY);
+                }
+            }
+            ImGui::EndDragDropTarget();
         }
         }
 
@@ -1259,143 +1555,169 @@ int main()
         }
         ImGui::End();
 
-        if (sceneTexture && selectedEntityId != 0)
+        ImGui::Begin("Scene", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::Text("Bounds");
+        ImGui::Checkbox("Enable Bounds", &scene.bounds().enabled);
+        ImGui::InputFloat("Bound X", &scene.bounds().x);
+        ImGui::InputFloat("Bound Y", &scene.bounds().y);
+        ImGui::InputFloat("Bound W", &scene.bounds().w);
+        ImGui::InputFloat("Bound H", &scene.bounds().h);
+        ImGui::Checkbox("Clamp Camera", &camClampToBounds);
+        ImGui::End();
+
+        if (sceneTexture)
         {
-            Entity *selectedEnt = engine.scene().findEntity(selectedEntityId);
-            float bx = 0.0f, by = 0.0f, bw = 0.0f, bh = 0.0f;
-            BoundsType btype = BoundsType::None;
-            if (selectedEnt && GetEntityBounds(*selectedEnt, bx, by, bw, bh, btype))
+            ImDrawList *dl = ImGui::GetForegroundDrawList();
+            if (scene.bounds().enabled)
             {
-                float sx0 = 0.0f, sy0 = 0.0f, sx1 = 0.0f, sy1 = 0.0f;
-                WorldToScreen(cam, bx, by, sceneTexW, sceneTexH, sx0, sy0);
-                WorldToScreen(cam, bx + bw, by + bh, sceneTexW, sceneTexH, sx1, sy1);
+                float bx0 = 0.0f, by0 = 0.0f, bx1 = 0.0f, by1 = 0.0f;
+                WorldToScreen(cam, scene.bounds().x, scene.bounds().y, sceneTexW, sceneTexH, bx0, by0);
+                WorldToScreen(cam, scene.bounds().x + scene.bounds().w, scene.bounds().y + scene.bounds().h, sceneTexW, sceneTexH, bx1, by1);
+                ImVec2 b0(lastGameViewMin.x + bx0, lastGameViewMin.y + by0);
+                ImVec2 b1(lastGameViewMin.x + bx1, lastGameViewMin.y + by1);
+                dl->AddRect(b0, b1, IM_COL32(120, 180, 255, 180), 0.0f, 0, 2.0f);
+            }
 
-                ImVec2 p0(lastGameViewMin.x + sx0, lastGameViewMin.y + sy0);
-                ImVec2 p1(lastGameViewMin.x + sx1, lastGameViewMin.y + sy1);
-
-                ImDrawList *dl = ImGui::GetForegroundDrawList();
-                ImU32 outline = IM_COL32(255, 200, 80, 220);
-                dl->AddRect(p0, p1, outline, 0.0f, 0, 2.0f);
-
-                ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
-                ImVec2 handleSize(8.0f, 8.0f);
-                ImVec2 moveMin(center.x - handleSize.x, center.y - handleSize.y);
-                ImVec2 moveMax(center.x + handleSize.x, center.y + handleSize.y);
-                dl->AddRectFilled(moveMin, moveMax, IM_COL32(80, 200, 255, 220));
-
-                ImVec2 scaleMin(p1.x - handleSize.x, p1.y - handleSize.y);
-                ImVec2 scaleMax(p1.x + handleSize.x, p1.y + handleSize.y);
-                dl->AddRectFilled(scaleMin, scaleMax, IM_COL32(200, 200, 80, 220));
-
-                ImVec2 rotCenter((p0.x + p1.x) * 0.5f, p0.y - 18.0f);
-                float rotRadius = 6.0f;
-                dl->AddCircleFilled(rotCenter, rotRadius, IM_COL32(200, 120, 240, 220));
-
-                ImVec2 mousePos = ImGui::GetMousePos();
-                bool overMove = mousePos.x >= moveMin.x && mousePos.x <= moveMax.x && mousePos.y >= moveMin.y && mousePos.y <= moveMax.y;
-                bool overScale = mousePos.x >= scaleMin.x && mousePos.x <= scaleMax.x && mousePos.y >= scaleMin.y && mousePos.y <= scaleMax.y;
-                bool overRotate = (std::abs(mousePos.x - rotCenter.x) <= rotRadius && std::abs(mousePos.y - rotCenter.y) <= rotRadius);
-
-                if (gameViewHovered && ImGui::IsMouseClicked(0))
+            if (selectedEntityId != 0)
+            {
+                Entity *selectedEnt = engine.scene().findEntity(selectedEntityId);
+                float bx = 0.0f, by = 0.0f, bw = 0.0f, bh = 0.0f;
+                BoundsType btype = BoundsType::None;
+                if (selectedEnt && GetEntityBounds(*selectedEnt, bx, by, bw, bh, btype))
                 {
-                    if (overMove)
-                    {
-                        draggingMove = true;
-                        draggingScale = false;
-                        draggingRotate = false;
-                        dragEntityId = selectedEntityId;
-                        dragOffsetX = mouseWorldX - selectedEnt->transform.x;
-                        dragOffsetY = mouseWorldY - selectedEnt->transform.y;
-                    }
-                    else if (overScale)
-                    {
-                        draggingScale = true;
-                        draggingMove = false;
-                        draggingRotate = false;
-                        dragEntityId = selectedEntityId;
-                        dragType = btype;
-                    }
-                    else if (overRotate && btype == BoundsType::Sprite)
-                    {
-                        draggingRotate = true;
-                        draggingMove = false;
-                        draggingScale = false;
-                        dragEntityId = selectedEntityId;
-                        dragStartRot = selectedEnt->sprite.rotationDeg;
-                        dragStartAngle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
-                    }
-                }
+                    float sx0 = 0.0f, sy0 = 0.0f, sx1 = 0.0f, sy1 = 0.0f;
+                    WorldToScreen(cam, bx, by, sceneTexW, sceneTexH, sx0, sy0);
+                    WorldToScreen(cam, bx + bw, by + bh, sceneTexW, sceneTexH, sx1, sy1);
 
-                if (draggingMove && dragEntityId == selectedEntityId && haveMouseWorld)
-                {
-                    float newX = mouseWorldX - dragOffsetX;
-                    float newY = mouseWorldY - dragOffsetY;
-                    bool lockX = ImGui::GetIO().KeyShift;
-                    bool lockY = ImGui::GetIO().KeyCtrl;
-                    if (lockX)
-                        newY = selectedEnt->transform.y;
-                    if (lockY)
-                        newX = selectedEnt->transform.x;
-                    if (snapEnabled)
-                    {
-                        newX = SnapValue(newX, snapMove);
-                        newY = SnapValue(newY, snapMove);
-                    }
-                    selectedEnt->transform.x = newX;
-                    selectedEnt->transform.y = newY;
-                    if (ImGui::IsMouseReleased(0))
-                        draggingMove = false;
-                }
-                else if (draggingScale && dragEntityId == selectedEntityId && haveMouseWorld)
-                {
-                    float newW = mouseWorldX - bx;
-                    float newH = mouseWorldY - by;
-                    if (newW < 1.0f)
-                        newW = 1.0f;
-                    if (newH < 1.0f)
-                        newH = 1.0f;
+                    ImVec2 p0(lastGameViewMin.x + sx0, lastGameViewMin.y + sy0);
+                    ImVec2 p1(lastGameViewMin.x + sx1, lastGameViewMin.y + sy1);
 
-                    if (snapEnabled)
+                    ImU32 outline = IM_COL32(255, 200, 80, 220);
+                    dl->AddRect(p0, p1, outline, 0.0f, 0, 2.0f);
+
+                    ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                    ImVec2 handleSize(8.0f, 8.0f);
+                    ImVec2 moveMin(center.x - handleSize.x, center.y - handleSize.y);
+                    ImVec2 moveMax(center.x + handleSize.x, center.y + handleSize.y);
+                    dl->AddRectFilled(moveMin, moveMax, IM_COL32(80, 200, 255, 220));
+
+                    ImVec2 scaleMin(p1.x - handleSize.x, p1.y - handleSize.y);
+                    ImVec2 scaleMax(p1.x + handleSize.x, p1.y + handleSize.y);
+                    dl->AddRectFilled(scaleMin, scaleMax, IM_COL32(200, 200, 80, 220));
+
+                    ImVec2 rotCenter((p0.x + p1.x) * 0.5f, p0.y - 18.0f);
+                    float rotRadius = 6.0f;
+                    dl->AddCircleFilled(rotCenter, rotRadius, IM_COL32(200, 120, 240, 220));
+
+                    ImVec2 mousePos = ImGui::GetMousePos();
+                    bool overMove = mousePos.x >= moveMin.x && mousePos.x <= moveMax.x && mousePos.y >= moveMin.y && mousePos.y <= moveMax.y;
+                    bool overScale = mousePos.x >= scaleMin.x && mousePos.x <= scaleMax.x && mousePos.y >= scaleMin.y && mousePos.y <= scaleMax.y;
+                    bool overRotate = (std::abs(mousePos.x - rotCenter.x) <= rotRadius && std::abs(mousePos.y - rotCenter.y) <= rotRadius);
+
+                    if (gameViewHovered && ImGui::IsMouseClicked(0))
                     {
-                        newW = SnapValue(newW, snapScale);
-                        newH = SnapValue(newH, snapScale);
+                        if (overMove)
+                        {
+                            draggingMove = true;
+                            draggingScale = false;
+                            draggingRotate = false;
+                            dragEntityId = selectedEntityId;
+                            dragOffsetX = mouseWorldX - selectedEnt->transform.x;
+                            dragOffsetY = mouseWorldY - selectedEnt->transform.y;
+                        }
+                        else if (overScale)
+                        {
+                            draggingScale = true;
+                            draggingMove = false;
+                            draggingRotate = false;
+                            dragEntityId = selectedEntityId;
+                            dragType = btype;
+                        }
+                        else if (overRotate && btype == BoundsType::Sprite)
+                        {
+                            draggingRotate = true;
+                            draggingMove = false;
+                            draggingScale = false;
+                            dragEntityId = selectedEntityId;
+                            dragStartRot = selectedEnt->sprite.rotationDeg;
+                            dragStartAngle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
+                        }
                     }
 
-                    if (dragType == BoundsType::Rect)
+                    if (draggingMove && dragEntityId == selectedEntityId && haveMouseWorld)
                     {
-                        selectedEnt->rect.w = (int)newW;
-                        selectedEnt->rect.h = (int)newH;
+                        float newX = mouseWorldX - dragOffsetX;
+                        float newY = mouseWorldY - dragOffsetY;
+                        bool lockX = ImGui::GetIO().KeyShift;
+                        bool lockY = ImGui::GetIO().KeyCtrl;
+                        if (lockX)
+                            newY = selectedEnt->transform.y;
+                        if (lockY)
+                            newX = selectedEnt->transform.x;
+                        if (snapEnabled)
+                        {
+                            newX = SnapValue(newX, snapMove);
+                            newY = SnapValue(newY, snapMove);
+                        }
+                        selectedEnt->transform.x = newX;
+                        selectedEnt->transform.y = newY;
+                        ClampEntityToBounds(scene.bounds(), *selectedEnt);
+                        if (ImGui::IsMouseReleased(0))
+                            draggingMove = false;
                     }
-                    else if (dragType == BoundsType::Collider)
+                    else if (draggingScale && dragEntityId == selectedEntityId && haveMouseWorld)
                     {
-                        selectedEnt->collider.w = newW;
-                        selectedEnt->collider.h = newH;
-                    }
-                    else if (dragType == BoundsType::Sprite && selectedEnt->sprite.texture)
-                    {
-                        float baseW = (float)selectedEnt->sprite.texture->width();
-                        float baseH = (float)selectedEnt->sprite.texture->height();
-                        float scaleW = newW / baseW;
-                        float scaleH = newH / baseH;
-                        float newScale = (scaleW > scaleH) ? scaleW : scaleH;
-                        if (newScale < 0.05f)
-                            newScale = 0.05f;
-                        selectedEnt->sprite.scale = newScale;
-                    }
+                        float newW = mouseWorldX - bx;
+                        float newH = mouseWorldY - by;
+                        if (newW < 1.0f)
+                            newW = 1.0f;
+                        if (newH < 1.0f)
+                            newH = 1.0f;
 
-                    if (ImGui::IsMouseReleased(0))
-                        draggingScale = false;
-                }
-                else if (draggingRotate && dragEntityId == selectedEntityId && haveMouseWorld)
-                {
-                    float angle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
-                    float delta = angle - dragStartAngle;
-                    float deg = dragStartRot + (delta * 180.0f / 3.14159265f);
-                    if (snapEnabled)
-                        deg = SnapValue(deg, snapRotate);
-                    selectedEnt->sprite.rotationDeg = deg;
-                    if (ImGui::IsMouseReleased(0))
-                        draggingRotate = false;
+                        if (snapEnabled)
+                        {
+                            newW = SnapValue(newW, snapScale);
+                            newH = SnapValue(newH, snapScale);
+                        }
+
+                        if (dragType == BoundsType::Rect)
+                        {
+                            selectedEnt->rect.w = (int)newW;
+                            selectedEnt->rect.h = (int)newH;
+                        }
+                        else if (dragType == BoundsType::Collider)
+                        {
+                            selectedEnt->collider.w = newW;
+                            selectedEnt->collider.h = newH;
+                        }
+                        else if (dragType == BoundsType::Sprite && selectedEnt->sprite.texture)
+                        {
+                            float baseW = (float)selectedEnt->sprite.texture->width();
+                            float baseH = (float)selectedEnt->sprite.texture->height();
+                            float scaleW = newW / baseW;
+                            float scaleH = newH / baseH;
+                            float newScale = (scaleW > scaleH) ? scaleW : scaleH;
+                            if (newScale < 0.05f)
+                                newScale = 0.05f;
+                            selectedEnt->sprite.scale = newScale;
+                        }
+
+                        ClampEntityToBounds(scene.bounds(), *selectedEnt);
+                        if (ImGui::IsMouseReleased(0))
+                            draggingScale = false;
+                    }
+                    else if (draggingRotate && dragEntityId == selectedEntityId && haveMouseWorld)
+                    {
+                        float angle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
+                        float delta = angle - dragStartAngle;
+                        float deg = dragStartRot + (delta * 180.0f / 3.14159265f);
+                        if (snapEnabled)
+                            deg = SnapValue(deg, snapRotate);
+                        selectedEnt->sprite.rotationDeg = deg;
+                        ClampEntityToBounds(scene.bounds(), *selectedEnt);
+                        if (ImGui::IsMouseReleased(0))
+                            draggingRotate = false;
+                    }
                 }
             }
         }

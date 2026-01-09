@@ -22,6 +22,7 @@ add_executable(game_engine
     src/Assets/AssetManifest.cpp
     src/Game/SandboxScenes.cpp
     src/World/Scene.cpp
+    src/World/SceneManager.h
     src/World/Tilemap.cpp
     src/Systems/RenderSystem.cpp
     src/Systems/TilemapSystem.cpp
