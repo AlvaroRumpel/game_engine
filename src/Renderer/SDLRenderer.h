@@ -23,7 +23,8 @@ public:
     void drawRect(float x, float y, int w, int h,
                   unsigned char r, unsigned char g, unsigned char b, unsigned char a) override;
 
-    void drawTexture(const Texture &tex, float x, float y, float scale = 1.0f) override;
+    void drawTexture(const Texture &tex, float x, float y, float scale,
+                     const TextureRegion *src, float rotationDeg) override;
 
     void drawText(const Font &font, const std::string &text,
                   float x, float y,
@@ -32,6 +33,7 @@ public:
     // expor para o AssetManager poder criar SDL_Texture
     SDL_Renderer *native() const { return r_; }
     void setCamera(const Camera2D &cam, int screenW, int screenH) override;
+    void submit(const CommandBuffer &cmds) override;
     void invalidateTextCache(const Font *font);
     std::size_t textCacheSize() const { return textCache_.size(); }
 

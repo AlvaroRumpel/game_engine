@@ -15,7 +15,7 @@ struct SDL_Renderer;
 #include "../Systems/RenderSystem.h"
 #include "../Systems/TilemapSystem.h"
 #include "../Systems/PhysicsSystem.h"
-#include "../Renderer/RenderQueue.h"
+#include "../Renderer/CommandBuffer.h"
 #include "Camera2D.h"
 
 class Engine
@@ -43,7 +43,8 @@ public:
     Entity *findEntity(int id);
     const std::vector<Entity> &entities() const { return entities_; }
 
-    RenderQueue &renderQueue() { return renderQueue_; }
+    CommandBuffer &commandBuffer() { return commandBuffer_; }
+    const CommandBuffer &commandBuffer() const { return commandBuffer_; }
 
     // Renderer API
     Renderer &renderer() { return *renderer_; }
@@ -101,6 +102,6 @@ private:
     TilemapSystem tilemapSystem_;
     PhysicsSystem physicsSystem_;
     RenderSystem renderSystem_;
-    RenderQueue renderQueue_;
+    CommandBuffer commandBuffer_;
     bool physicsDebugDraw_ = false;
 };

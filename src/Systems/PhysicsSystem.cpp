@@ -221,7 +221,7 @@ void PhysicsSystem::step(Engine &engine, Scene &scene, float fixedDt, IScene *ca
 
 void PhysicsSystem::debugRender(Engine &engine, const Scene &scene)
 {
-    auto &q = engine.renderQueue();
+    auto &q = engine.commandBuffer();
 
     for (const auto &e : scene.entities())
     {

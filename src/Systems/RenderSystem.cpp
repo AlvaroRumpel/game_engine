@@ -4,7 +4,7 @@
 
 void RenderSystem::render(Engine &engine, const Scene &scene)
 {
-    auto &q = engine.renderQueue();
+    auto &q = engine.commandBuffer();
 
     for (const auto &e : scene.entities())
     {

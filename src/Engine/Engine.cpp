@@ -100,9 +100,9 @@ void Engine::run(std::unique_ptr<IScene> startScene)
         // Render
         renderer_->beginFrame();
 
-        renderQueue_.nextFrame(time_.frameCount());
+        commandBuffer_.nextFrame(time_.frameCount());
 
-        renderQueue_.clear();
+        commandBuffer_.clear();
 
         // Tilemap + RenderSystem coleta comandos do mundo
         tilemapSystem_.render(*this, scene_);
@@ -114,14 +114,16 @@ void Engine::run(std::unique_ptr<IScene> startScene)
         if (currentScene_)
             currentScene_->onRenderUI(*this);
 
+        commandBuffer_.finalize();
+
         renderer_->setCamera(camera_, width_, height_);
-        // Executa a fila (desenha de fato)
-        renderQueue_.flush(*renderer_);
+        // Executa o command buffer (desenha de fato)
+        renderer_->submit(commandBuffer_);
         static int counter = 0;
         counter++;
         if (counter % 120 == 0)
         {
-            const auto &s = renderQueue_.stats();
+            const auto &s = commandBuffer_.stats();
             std::printf("[RenderStats] cmds=%u rect=%u sprite=%u binds~=%u\n",
                         s.commandsSubmitted, s.rectDraws, s.spriteDraws, s.textureBindsEstimated);
         }

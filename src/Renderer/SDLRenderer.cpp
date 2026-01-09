@@ -2,6 +2,7 @@
 #include "../Assets/Texture.h"
 #include <SDL.h>
 #include "../Assets/Font.h"
+#include "CommandBuffer.h"
 #include <SDL_ttf.h>
 #include <cstdio>
 
@@ -41,22 +42,37 @@ void SDLRenderer::drawRect(float x, float y, int w, int h,
     SDL_RenderFillRect(r_, &rect);
 }
 
-void SDLRenderer::drawTexture(const Texture &tex, float x, float y, float scale)
+void SDLRenderer::drawTexture(const Texture &tex, float x, float y, float scale,
+                              const TextureRegion *src, float rotationDeg)
 {
     if (!tex.native_)
         return;
 
     SDL_SetTextureBlendMode(tex.native_, SDL_BLENDMODE_BLEND);
 
+    SDL_Rect srcRect;
+    SDL_Rect *srcRectPtr = nullptr;
+    if (src && src->w > 0 && src->h > 0)
+    {
+        srcRect.x = src->x;
+        srcRect.y = src->y;
+        srcRect.w = src->w;
+        srcRect.h = src->h;
+        srcRectPtr = &srcRect;
+    }
+
     SDL_Rect dst;
     dst.x = (int)worldToScreenX(x);
     dst.y = (int)worldToScreenY(y);
 
     float s = scale * cam_.zoom;
-    dst.w = (int)(tex.width_ * s);
-    dst.h = (int)(tex.height_ * s);
+    int baseW = srcRectPtr ? srcRectPtr->w : tex.width_;
+    int baseH = srcRectPtr ? srcRectPtr->h : tex.height_;
+    dst.w = (int)(baseW * s);
+    dst.h = (int)(baseH * s);
 
-    SDL_RenderCopy(r_, tex.native_, nullptr, &dst);
+    SDL_Point center{dst.w / 2, dst.h / 2};
+    SDL_RenderCopyEx(r_, tex.native_, srcRectPtr, &dst, rotationDeg, &center, SDL_FLIP_NONE);
 }
 
 void SDLRenderer::drawText(const Font &font, const std::string &text,
@@ -133,6 +149,38 @@ void SDLRenderer::setCamera(const Camera2D &cam, int screenW, int screenH)
     cam_ = cam;
     screenW_ = screenW;
     screenH_ = screenH;
+}
+
+void SDLRenderer::submit(const CommandBuffer &cmds)
+{
+    // 1) rects
+    for (const auto &c : cmds.commands())
+    {
+        if (c.type != RenderCommandType::Rect)
+            continue;
+        drawRect(c.x, c.y, c.w, c.h, c.r, c.g, c.b, c.a);
+    }
+
+    // 2) sprite batches
+    for (const auto &batch : cmds.spriteBatches())
+    {
+        if (!batch.texture)
+            continue;
+        for (const auto &inst : batch.sprites)
+        {
+            TextureRegion src;
+            TextureRegion *srcPtr = nullptr;
+            if (inst.useSrcRect && inst.srcW > 0 && inst.srcH > 0)
+            {
+                src.x = inst.srcX;
+                src.y = inst.srcY;
+                src.w = inst.srcW;
+                src.h = inst.srcH;
+                srcPtr = &src;
+            }
+            drawTexture(*batch.texture, inst.x, inst.y, inst.scale, srcPtr, inst.rotationDeg);
+        }
+    }
 }
 
 void SDLRenderer::invalidateTextCache(const Font *font)

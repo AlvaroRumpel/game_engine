@@ -23,7 +23,7 @@ add_executable(game_engine
     src/Systems/RenderSystem.cpp
     src/Systems/TilemapSystem.cpp
     src/Systems/PhysicsSystem.cpp
-    src/Renderer/RenderQueue.cpp
+    src/Renderer/CommandBuffer.cpp
 )
 
 target_link_libraries(game_engine PRIVATE

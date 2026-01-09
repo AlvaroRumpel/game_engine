@@ -64,7 +64,7 @@ static int CreateObstacle(Engine &engine, float x, float y, int w, int h, unsign
 static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
 {
   const Time &time = engine.time();
-  const RenderStats &stats = engine.renderQueue().stats();
+  const RenderStats &stats = engine.commandBuffer().stats();
   const Camera2D &cam = engine.camera();
   const PhysicsStats &physics = engine.physicsStats();
 

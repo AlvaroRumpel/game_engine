@@ -29,7 +29,7 @@ static TileColor ColorForTile(int id)
 
 void TilemapSystem::render(Engine &engine, const Scene &scene)
 {
-    auto &q = engine.renderQueue();
+    auto &q = engine.commandBuffer();
 
     float wx0 = 0.0f;
     float wy0 = 0.0f;
