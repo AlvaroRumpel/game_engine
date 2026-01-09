@@ -1,5 +1,4 @@
 #include "Engine.h"
-#include "../Game/IGame.h"
 #include "../Renderer/SDLRenderer.h"
 
 #include <SDL.h>
@@ -17,6 +16,12 @@ static Key ToKey(SDL_Keycode k)
         return Key::W;
     case SDLK_s:
         return Key::S;
+    case SDLK_q:
+        return Key::Q;
+    case SDLK_e:
+        return Key::E;
+    case SDLK_TAB:
+        return Key::Tab;
 
     case SDLK_LEFT:
         return Key::Left;
@@ -41,7 +46,7 @@ Engine::~Engine()
     shutdown();
 }
 
-void Engine::run(IGame &game)
+void Engine::run(std::unique_ptr<IScene> startScene)
 {
     if (!init())
         return;
@@ -49,7 +54,12 @@ void Engine::run(IGame &game)
     running_ = true;
     quitRequested_ = false;
 
-    game.onInit(*this);
+    currentScene_ = std::move(startScene);
+    if (currentScene_)
+    {
+        scene_.clear();
+        currentScene_->onEnter(*this);
+    }
 
     Uint32 lastTicks = SDL_GetTicks();
     time_.reset();
@@ -67,20 +77,22 @@ void Engine::run(IGame &game)
 
         // Frame timing
         time_.beginFrame(rawDt);
+        applyPendingScene();
 
         // Fixed updates (0..N por frame)
         int steps = 0;
         while (time_.accumulator() >= time_.fixedDelta() &&
                steps < time_.maxFixedStepsPerFrame())
         {
-
-            game.onFixedUpdate(*this, time_.fixedDelta());
+            if (currentScene_)
+                currentScene_->onFixedUpdate(*this, time_.fixedDelta());
             time_.consumeFixedStep();
             steps++;
         }
 
-        // Update variável (1x por frame)
-        game.onUpdate(*this, time_.deltaTime());
+        // Update variavel (1x por frame)
+        if (currentScene_)
+            currentScene_->onUpdate(*this, time_.deltaTime());
 
         // Render
         renderer_->beginFrame();
@@ -92,8 +104,9 @@ void Engine::run(IGame &game)
         // RenderSystem coleta comandos do mundo
         renderSystem_.render(*this, scene_);
 
-        // Game pode adicionar debug/UI também
-        game.onRender(*this);
+        // Scene pode adicionar debug/UI tambem
+        if (currentScene_)
+            currentScene_->onRenderUI(*this);
 
         renderer_->setCamera(camera_, width_, height_);
         // Executa a fila (desenha de fato)
@@ -112,10 +125,10 @@ void Engine::run(IGame &game)
         SDL_Delay(1);
     }
 
-    game.onShutdown(*this);
+    if (currentScene_)
+        currentScene_->onExit(*this);
     shutdown();
 }
-
 bool Engine::init()
 {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
@@ -160,14 +173,23 @@ bool Engine::init()
 
     assets_ = std::make_unique<AssetManager>(*backendRenderer_);
 
-    input_.setAxisMapping("Horizontal", AxisMapping{
-                                            /*positive*/ {Key::D, Key::Right},
-                                            /*negative*/ {Key::A, Key::Left}});
+    input_.setAxisMapping("MoveX", AxisMapping{
+                                       /*positive*/ {Key::D, Key::Right},
+                                       /*negative*/ {Key::A, Key::Left}});
 
-    // Axis: Vertical = (W/Up) negativo, (S/Down) positivo
-    input_.setAxisMapping("Vertical", AxisMapping{
-                                          /*positive*/ {Key::S, Key::Down},
-                                          /*negative*/ {Key::W, Key::Up}});
+    // Axis: MoveY = (W/Up) negativo, (S/Down) positivo
+    input_.setAxisMapping("MoveY", AxisMapping{
+                                       /*positive*/ {Key::S, Key::Down},
+                                       /*negative*/ {Key::W, Key::Up}});
+
+    input_.setActionBinding("ZoomIn", ActionBinding{
+                                          /*keys*/ {Key::E},
+                                          /*wheelDir*/ 1});
+    input_.setActionBinding("ZoomOut", ActionBinding{
+                                           /*keys*/ {Key::Q},
+                                           /*wheelDir*/ -1});
+    input_.setActionBinding("ToggleDebug", ActionBinding{
+                                               /*keys*/ {Key::Tab}});
 
     return true;
 }
@@ -218,7 +240,44 @@ void Engine::processInput()
                 quitRequested_ = true;
             }
         }
+
+        if (e.type == SDL_MOUSEMOTION)
+        {
+            input_.setMousePosition(e.motion.x, e.motion.y);
+        }
+
+        if (e.type == SDL_MOUSEWHEEL)
+        {
+            float wheel = (float)e.wheel.y;
+            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
+                wheel = -wheel;
+            input_.setMouseWheelDelta(wheel);
+        }
     }
+
+    int mx = 0;
+    int my = 0;
+    SDL_GetMouseState(&mx, &my);
+    input_.setMousePosition(mx, my);
+}
+
+void Engine::setScene(std::unique_ptr<IScene> nextScene)
+{
+    pendingScene_ = std::move(nextScene);
+}
+
+void Engine::applyPendingScene()
+{
+    if (!pendingScene_)
+        return;
+
+    if (currentScene_)
+        currentScene_->onExit(*this);
+
+    scene_.clear();
+    currentScene_ = std::move(pendingScene_);
+    if (currentScene_)
+        currentScene_->onEnter(*this);
 }
 
 Entity &Engine::createEntity()

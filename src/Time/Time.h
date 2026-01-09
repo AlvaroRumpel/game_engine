@@ -14,12 +14,14 @@ public:
 
     // API (Game/Engine)
     float deltaTime() const { return deltaTime_; }           // dt do frame
+    float unscaledDeltaTime() const { return unscaledDeltaTime_; }
     float fixedDelta() const { return fixedDelta_; }         // dt fixo
     std::uint64_t frameCount() const { return frameCount_; } // frames renderizados
     std::uint64_t fixedStepCount() const { return fixedStepCount_; }
 
     float timeSinceStart() const { return timeSinceStart_; } // segundos (aprox.)
     float accumulator() const { return accumulator_; }       // segundos acumulados p/ fixed
+    float fps() const { return fps_; }
 
     // Config
     void setFixedDelta(float seconds) { fixedDelta_ = seconds; }
@@ -30,6 +32,7 @@ public:
 
 private:
     float deltaTime_ = 0.0f;
+    float unscaledDeltaTime_ = 0.0f;
     float fixedDelta_ = 1.0f / 60.0f;
 
     float maxDelta_ = 0.1f; // 100ms
@@ -41,4 +44,8 @@ private:
     std::uint64_t fixedStepCount_ = 0;
 
     float timeSinceStart_ = 0.0f;
+
+    float fps_ = 0.0f;
+    float fpsAccumTime_ = 0.0f;
+    std::uint64_t fpsAccumFrames_ = 0;
 };

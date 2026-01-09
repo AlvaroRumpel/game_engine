@@ -4,5 +4,6 @@
     "VCPKG_TARGET_TRIPLET": "x64-windows"
   },
 "cmake.generator": "Visual Studio 17 2022",
-"cmake.sourceDirectory": "F:/Alvaro/Desktop/Projetos/game_engine"
+"cmake.sourceDirectory": "F:/Alvaro/Desktop/Projetos/game_engine",
+"C_Cpp.errorSquiggles": "disabled"
 }

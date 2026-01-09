@@ -11,11 +11,10 @@ struct SDL_Renderer;
 #include "../Time/Time.h"
 #include "../Assets/AssetManager.h"
 #include "../World/Scene.h"
+#include "../World/IScene.h"
 #include "../Systems/RenderSystem.h"
 #include "../Renderer/RenderQueue.h"
 #include "Camera2D.h"
-
-class IGame;
 
 class Engine
 {
@@ -23,13 +22,19 @@ public:
     Engine();
     ~Engine();
 
-    void run(IGame &game);
+    void run(std::unique_ptr<IScene> startScene);
+    void setScene(std::unique_ptr<IScene> nextScene);
 
     Camera2D &camera() { return camera_; }
     const Camera2D &camera() const { return camera_; }
 
     int screenWidth() const { return width_; }
     int screenHeight() const { return height_; }
+    void screenToWorld(float sx, float sy, float &wx, float &wy) const
+    {
+        wx = (sx - (width_ * 0.5f)) / camera_.zoom + camera_.x;
+        wy = (sy - (height_ * 0.5f)) / camera_.zoom + camera_.y;
+    }
 
     // World
     Entity &createEntity();
@@ -56,6 +61,7 @@ private:
     bool init();
     void shutdown();
     void processInput();
+    void applyPendingScene();
 
 private:
     bool running_ = false;
@@ -82,6 +88,8 @@ private:
     SDLRenderer *backendRenderer_ = nullptr;
 
     Scene scene_;
+    std::unique_ptr<IScene> currentScene_;
+    std::unique_ptr<IScene> pendingScene_;
     RenderSystem renderSystem_;
     RenderQueue renderQueue_;
 };
