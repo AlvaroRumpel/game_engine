@@ -4,6 +4,7 @@
 
 struct SDL_Window;
 struct SDL_Renderer;
+union SDL_Event;
 
 #include "../Renderer/Renderer.h"
 #include "../World/Entity.h"
@@ -26,6 +27,17 @@ public:
 
     void run(std::unique_ptr<IScene> startScene);
     void setScene(std::unique_ptr<IScene> nextScene);
+
+    bool start();
+    void stop();
+    void beginInputFrame();
+    void handleEvent(const SDL_Event &e);
+    void finalizeInput();
+    bool shouldQuit() const { return quitRequested_; }
+
+    void tick(float dt);
+    void renderWorld(bool includeSceneUI);
+    void present();
 
     Camera2D &camera() { return camera_; }
     const Camera2D &camera() const { return camera_; }
@@ -59,6 +71,9 @@ public:
 
     Scene &scene() { return scene_; }
     const Scene &scene() const { return scene_; }
+
+    SDL_Window *nativeWindow() const { return window_; }
+    SDL_Renderer *nativeSDLRenderer() const { return sdlRenderer_; }
 
     PhysicsSystem &physics() { return physicsSystem_; }
     const PhysicsSystem &physics() const { return physicsSystem_; }

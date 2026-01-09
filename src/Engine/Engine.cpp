@@ -50,21 +50,13 @@ Engine::~Engine()
 
 void Engine::run(std::unique_ptr<IScene> startScene)
 {
-    if (!init())
+    if (!start())
         return;
 
-    running_ = true;
-    quitRequested_ = false;
-
-    currentScene_ = std::move(startScene);
-    if (currentScene_)
-    {
-        scene_.clear();
-        currentScene_->onEnter(*this);
-    }
+    setScene(std::move(startScene));
+    applyPendingScene();
 
     Uint32 lastTicks = SDL_GetTicks();
-    time_.reset();
 
     while (running_)
     {
@@ -73,69 +65,149 @@ void Engine::run(std::unique_ptr<IScene> startScene)
         lastTicks = nowTicks;
 
         processInput();
-        assets().updateHotReload();
         if (quitRequested_)
             running_ = false;
 
-        // Frame timing
-        time_.beginFrame(rawDt);
-        applyPendingScene();
-
-        // Fixed updates (0..N por frame)
-        int steps = 0;
-        while (time_.accumulator() >= time_.fixedDelta() &&
-               steps < time_.maxFixedStepsPerFrame())
-        {
-            if (currentScene_)
-                currentScene_->onFixedUpdate(*this, time_.fixedDelta());
-            physicsSystem_.step(*this, scene_, time_.fixedDelta(), currentScene_.get());
-            time_.consumeFixedStep();
-            steps++;
-        }
-
-        // Update variavel (1x por frame)
-        if (currentScene_)
-            currentScene_->onUpdate(*this, time_.deltaTime());
-
-        // Render
-        renderer_->beginFrame();
-
-        commandBuffer_.nextFrame(time_.frameCount());
-
-        commandBuffer_.clear();
-
-        // Tilemap + RenderSystem coleta comandos do mundo
-        tilemapSystem_.render(*this, scene_);
-        renderSystem_.render(*this, scene_);
-        if (physicsDebugDraw_)
-            physicsSystem_.debugRender(*this, scene_);
-
-        // Scene pode adicionar debug/UI tambem
-        if (currentScene_)
-            currentScene_->onRenderUI(*this);
-
-        commandBuffer_.finalize();
-
-        renderer_->setCamera(camera_, width_, height_);
-        // Executa o command buffer (desenha de fato)
-        renderer_->submit(commandBuffer_);
-        static int counter = 0;
-        counter++;
-        if (counter % 120 == 0)
-        {
-            const auto &s = commandBuffer_.stats();
-            std::printf("[RenderStats] cmds=%u rect=%u sprite=%u binds~=%u\n",
-                        s.commandsSubmitted, s.rectDraws, s.spriteDraws, s.textureBindsEstimated);
-        }
-
-        renderer_->endFrame();
+        tick(rawDt);
+        renderWorld(true);
+        present();
 
         SDL_Delay(1);
     }
 
+    stop();
+}
+
+bool Engine::start()
+{
+    if (!init())
+        return false;
+
+    running_ = true;
+    quitRequested_ = false;
+    time_.reset();
+    return true;
+}
+
+void Engine::stop()
+{
+    running_ = false;
     if (currentScene_)
         currentScene_->onExit(*this);
     shutdown();
+}
+
+void Engine::beginInputFrame()
+{
+    input_.beginFrame();
+}
+
+void Engine::handleEvent(const SDL_Event &e)
+{
+    if (e.type == SDL_QUIT)
+    {
+        quitRequested_ = true;
+    }
+
+    if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)
+    {
+        bool down = (e.type == SDL_KEYDOWN);
+
+        Key key = ToKey(e.key.keysym.sym);
+        if (key != Key::Unknown)
+        {
+            input_.setKeyDown(key, down);
+        }
+
+        if (down && key == Key::Escape)
+        {
+            quitRequested_ = true;
+        }
+    }
+
+    if (e.type == SDL_MOUSEMOTION)
+    {
+        input_.setMousePosition(e.motion.x, e.motion.y);
+    }
+
+    if (e.type == SDL_MOUSEWHEEL)
+    {
+        float wheel = (float)e.wheel.y;
+        if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
+            wheel = -wheel;
+        input_.setMouseWheelDelta(wheel);
+    }
+}
+
+void Engine::finalizeInput()
+{
+    int mx = 0;
+    int my = 0;
+    SDL_GetMouseState(&mx, &my);
+    input_.setMousePosition(mx, my);
+}
+
+void Engine::tick(float dt)
+{
+    assets().updateHotReload();
+
+    // Frame timing
+    time_.beginFrame(dt);
+    applyPendingScene();
+
+    // Fixed updates (0..N por frame)
+    int steps = 0;
+    while (time_.accumulator() >= time_.fixedDelta() &&
+           steps < time_.maxFixedStepsPerFrame())
+    {
+        if (currentScene_)
+            currentScene_->onFixedUpdate(*this, time_.fixedDelta());
+        physicsSystem_.step(*this, scene_, time_.fixedDelta(), currentScene_.get());
+        time_.consumeFixedStep();
+        steps++;
+    }
+
+    // Update variavel (1x por frame)
+    if (currentScene_)
+        currentScene_->onUpdate(*this, time_.deltaTime());
+}
+
+void Engine::renderWorld(bool includeSceneUI)
+{
+    // Render
+    renderer_->beginFrame();
+
+    commandBuffer_.nextFrame(time_.frameCount());
+    commandBuffer_.clear();
+
+    // Tilemap + RenderSystem coleta comandos do mundo
+    tilemapSystem_.render(*this, scene_);
+    renderSystem_.render(*this, scene_);
+    if (physicsDebugDraw_)
+        physicsSystem_.debugRender(*this, scene_);
+
+    if (includeSceneUI && currentScene_)
+        currentScene_->onRenderUI(*this);
+
+    commandBuffer_.finalize();
+
+    renderer_->setCamera(camera_, width_, height_);
+    // Executa o command buffer (desenha de fato)
+    renderer_->submit(commandBuffer_);
+
+    static int counter = 0;
+    counter++;
+    if (counter % 120 == 0)
+    {
+        const auto &s = commandBuffer_.stats();
+        std::printf("[RenderStats] cmds=%u rect=%u sprite=%u binds~=%u\n",
+                    s.commandsSubmitted, s.rectDraws, s.spriteDraws, s.textureBindsEstimated);
+    }
+}
+
+void Engine::present()
+{
+    renderer_->endFrame();
 }
 bool Engine::init()
 {
@@ -226,50 +298,15 @@ void Engine::shutdown()
 
 void Engine::processInput()
 {
-    input_.beginFrame();
+    beginInputFrame();
 
     SDL_Event e;
     while (SDL_PollEvent(&e))
     {
-        if (e.type == SDL_QUIT)
-        {
-            quitRequested_ = true;
-        }
-
-        if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)
-        {
-            bool down = (e.type == SDL_KEYDOWN);
-
-            Key key = ToKey(e.key.keysym.sym);
-            if (key != Key::Unknown)
-            {
-                input_.setKeyDown(key, down);
-            }
-
-            if (down && key == Key::Escape)
-            {
-                quitRequested_ = true;
-            }
-        }
-
-        if (e.type == SDL_MOUSEMOTION)
-        {
-            input_.setMousePosition(e.motion.x, e.motion.y);
-        }
-
-        if (e.type == SDL_MOUSEWHEEL)
-        {
-            float wheel = (float)e.wheel.y;
-            if (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED)
-                wheel = -wheel;
-            input_.setMouseWheelDelta(wheel);
-        }
+        handleEvent(e);
     }
 
-    int mx = 0;
-    int my = 0;
-    SDL_GetMouseState(&mx, &my);
-    input_.setMousePosition(mx, my);
+    finalizeInput();
 }
 
 void Engine::setScene(std::unique_ptr<IScene> nextScene)
