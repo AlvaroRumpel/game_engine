@@ -1,6 +1,7 @@
 #define SDL_MAIN_HANDLED
 #include "Engine/Engine.h"
 #include "Game/SandboxScenes.h"
+#include "Assets/Texture.h"
 #include <SDL.h>
 #include <algorithm>
 #include <cstdio>
@@ -249,9 +250,56 @@ static void ScreenToWorld(const Camera2D &cam, float sx, float sy, int viewW, in
     wy = (sy - (viewH * 0.5f)) / cam.zoom + cam.y;
 }
 
+static void WorldToScreen(const Camera2D &cam, float wx, float wy, int viewW, int viewH, float &sx, float &sy)
+{
+    sx = (wx - cam.x) * cam.zoom + (viewW * 0.5f);
+    sy = (wy - cam.y) * cam.zoom + (viewH * 0.5f);
+}
+
 static bool PointInRect(float px, float py, float x, float y, float w, float h)
 {
     return px >= x && py >= y && px <= (x + w) && py <= (y + h);
+}
+
+enum class BoundsType
+{
+    None,
+    Rect,
+    Collider,
+    Sprite
+};
+
+static bool GetEntityBounds(const Entity &e, float &x, float &y, float &w, float &h, BoundsType &type)
+{
+    if (e.collider.enabled)
+    {
+        x = e.transform.x + e.collider.offsetX;
+        y = e.transform.y + e.collider.offsetY;
+        w = e.collider.w;
+        h = e.collider.h;
+        type = BoundsType::Collider;
+        return true;
+    }
+    if (e.rect.enabled)
+    {
+        x = e.transform.x;
+        y = e.transform.y;
+        w = (float)e.rect.w;
+        h = (float)e.rect.h;
+        type = BoundsType::Rect;
+        return true;
+    }
+    if (e.sprite.enabled && e.sprite.texture)
+    {
+        x = e.transform.x;
+        y = e.transform.y;
+        w = (float)e.sprite.texture->width() * e.sprite.scale;
+        h = (float)e.sprite.texture->height() * e.sprite.scale;
+        type = BoundsType::Sprite;
+        return true;
+    }
+    type = BoundsType::None;
+    return false;
 }
 
 static bool PickEntityAt(Scene &scene, float wx, float wy, int &outId)
@@ -367,6 +415,12 @@ int main()
     bool gameViewInputActive = false;
     ImVec2 lastGameViewMin(0.0f, 0.0f);
     ImVec2 lastGameViewMax(0.0f, 0.0f);
+    bool draggingMove = false;
+    bool draggingScale = false;
+    int dragEntityId = 0;
+    float dragOffsetX = 0.0f;
+    float dragOffsetY = 0.0f;
+    BoundsType dragType = BoundsType::None;
     float leftPanelW = 280.0f;
     float rightPanelW = 280.0f;
     float consoleH = 120.0f;
@@ -675,7 +729,7 @@ int main()
                 {
                     ScreenToWorld(cam, localX, localY, sceneTexW, sceneTexH, mouseWorldX, mouseWorldY);
                     haveMouseWorld = true;
-                    if (ImGui::IsMouseClicked(0))
+                    if (!draggingMove && !draggingScale && ImGui::IsMouseClicked(0))
                     {
                         int pickedId = 0;
                         if (PickEntityAt(engine.scene(), mouseWorldX, mouseWorldY, pickedId))
@@ -696,13 +750,108 @@ int main()
             ImGui::Text("Mouse World: %.1f, %.1f", mouseWorldX, mouseWorldY);
         ImGui::End();
 
+        if (sceneTexture && selectedEntityId != 0)
+        {
+            Entity *selectedEnt = engine.scene().findEntity(selectedEntityId);
+            float bx = 0.0f, by = 0.0f, bw = 0.0f, bh = 0.0f;
+            BoundsType btype = BoundsType::None;
+            if (selectedEnt && GetEntityBounds(*selectedEnt, bx, by, bw, bh, btype))
+            {
+                float sx0 = 0.0f, sy0 = 0.0f, sx1 = 0.0f, sy1 = 0.0f;
+                WorldToScreen(cam, bx, by, sceneTexW, sceneTexH, sx0, sy0);
+                WorldToScreen(cam, bx + bw, by + bh, sceneTexW, sceneTexH, sx1, sy1);
+
+                ImVec2 p0(lastGameViewMin.x + sx0, lastGameViewMin.y + sy0);
+                ImVec2 p1(lastGameViewMin.x + sx1, lastGameViewMin.y + sy1);
+
+                ImDrawList *dl = ImGui::GetForegroundDrawList();
+                ImU32 outline = IM_COL32(255, 200, 80, 220);
+                dl->AddRect(p0, p1, outline, 0.0f, 0, 2.0f);
+
+                ImVec2 center((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+                ImVec2 handleSize(8.0f, 8.0f);
+                ImVec2 moveMin(center.x - handleSize.x, center.y - handleSize.y);
+                ImVec2 moveMax(center.x + handleSize.x, center.y + handleSize.y);
+                dl->AddRectFilled(moveMin, moveMax, IM_COL32(80, 200, 255, 220));
+
+                ImVec2 scaleMin(p1.x - handleSize.x, p1.y - handleSize.y);
+                ImVec2 scaleMax(p1.x + handleSize.x, p1.y + handleSize.y);
+                dl->AddRectFilled(scaleMin, scaleMax, IM_COL32(200, 200, 80, 220));
+
+                ImVec2 mousePos = ImGui::GetMousePos();
+                bool overMove = mousePos.x >= moveMin.x && mousePos.x <= moveMax.x && mousePos.y >= moveMin.y && mousePos.y <= moveMax.y;
+                bool overScale = mousePos.x >= scaleMin.x && mousePos.x <= scaleMax.x && mousePos.y >= scaleMin.y && mousePos.y <= scaleMax.y;
+
+                if (gameViewHovered && ImGui::IsMouseClicked(0))
+                {
+                    if (overMove)
+                    {
+                        draggingMove = true;
+                        draggingScale = false;
+                        dragEntityId = selectedEntityId;
+                        dragOffsetX = mouseWorldX - selectedEnt->transform.x;
+                        dragOffsetY = mouseWorldY - selectedEnt->transform.y;
+                    }
+                    else if (overScale)
+                    {
+                        draggingScale = true;
+                        draggingMove = false;
+                        dragEntityId = selectedEntityId;
+                        dragType = btype;
+                    }
+                }
+
+                if (draggingMove && dragEntityId == selectedEntityId && haveMouseWorld)
+                {
+                    selectedEnt->transform.x = mouseWorldX - dragOffsetX;
+                    selectedEnt->transform.y = mouseWorldY - dragOffsetY;
+                    if (ImGui::IsMouseReleased(0))
+                        draggingMove = false;
+                }
+                else if (draggingScale && dragEntityId == selectedEntityId && haveMouseWorld)
+                {
+                    float newW = mouseWorldX - bx;
+                    float newH = mouseWorldY - by;
+                    if (newW < 1.0f)
+                        newW = 1.0f;
+                    if (newH < 1.0f)
+                        newH = 1.0f;
+
+                    if (dragType == BoundsType::Rect)
+                    {
+                        selectedEnt->rect.w = (int)newW;
+                        selectedEnt->rect.h = (int)newH;
+                    }
+                    else if (dragType == BoundsType::Collider)
+                    {
+                        selectedEnt->collider.w = newW;
+                        selectedEnt->collider.h = newH;
+                    }
+                    else if (dragType == BoundsType::Sprite && selectedEnt->sprite.texture)
+                    {
+                        float baseW = (float)selectedEnt->sprite.texture->width();
+                        float baseH = (float)selectedEnt->sprite.texture->height();
+                        float scaleW = newW / baseW;
+                        float scaleH = newH / baseH;
+                        float newScale = (scaleW > scaleH) ? scaleW : scaleH;
+                        if (newScale < 0.05f)
+                            newScale = 0.05f;
+                        selectedEnt->sprite.scale = newScale;
+                    }
+
+                    if (ImGui::IsMouseReleased(0))
+                        draggingScale = false;
+                }
+            }
+        }
+
         ImGui::SetNextWindowPos(ImVec2(0, (float)winH - consoleH));
         ImGui::SetNextWindowSize(ImVec2((float)winW, consoleH));
         ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
         ImGui::TextWrapped("%s", importStatus.c_str());
         ImGui::End();
 
-        gameViewInputActive = gameViewHovered || gameViewFocused;
+        gameViewInputActive = (gameViewHovered || gameViewFocused) && !(draggingMove || draggingScale);
 
         ImGui::SetNextWindowPos(ImVec2(leftPanelW - 3.0f, contentY));
         ImGui::SetNextWindowSize(ImVec2(6.0f, contentH));
