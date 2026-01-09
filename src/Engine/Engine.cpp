@@ -10,6 +10,8 @@ static Key ToKey(SDL_Keycode k)
     {
     case SDLK_a:
         return Key::A;
+    case SDLK_c:
+        return Key::C;
     case SDLK_d:
         return Key::D;
     case SDLK_w:
@@ -86,6 +88,7 @@ void Engine::run(std::unique_ptr<IScene> startScene)
         {
             if (currentScene_)
                 currentScene_->onFixedUpdate(*this, time_.fixedDelta());
+            physicsSystem_.step(*this, scene_, time_.fixedDelta(), currentScene_.get());
             time_.consumeFixedStep();
             steps++;
         }
@@ -104,6 +107,8 @@ void Engine::run(std::unique_ptr<IScene> startScene)
         // Tilemap + RenderSystem coleta comandos do mundo
         tilemapSystem_.render(*this, scene_);
         renderSystem_.render(*this, scene_);
+        if (physicsDebugDraw_)
+            physicsSystem_.debugRender(*this, scene_);
 
         // Scene pode adicionar debug/UI tambem
         if (currentScene_)
@@ -191,6 +196,8 @@ bool Engine::init()
                                            /*wheelDir*/ -1});
     input_.setActionBinding("ToggleDebug", ActionBinding{
                                                /*keys*/ {Key::Tab}});
+    input_.setActionBinding("ToggleCollision", ActionBinding{
+                                                  /*keys*/ {Key::C}});
 
     return true;
 }
@@ -277,6 +284,7 @@ void Engine::applyPendingScene()
 
     scene_.clear();
     currentScene_ = std::move(pendingScene_);
+    physicsSystem_.reset();
     if (currentScene_)
         currentScene_->onEnter(*this);
 }

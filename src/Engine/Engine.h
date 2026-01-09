@@ -14,6 +14,7 @@ struct SDL_Renderer;
 #include "../World/IScene.h"
 #include "../Systems/RenderSystem.h"
 #include "../Systems/TilemapSystem.h"
+#include "../Systems/PhysicsSystem.h"
 #include "../Renderer/RenderQueue.h"
 #include "Camera2D.h"
 
@@ -58,6 +59,12 @@ public:
     Scene &scene() { return scene_; }
     const Scene &scene() const { return scene_; }
 
+    PhysicsSystem &physics() { return physicsSystem_; }
+    const PhysicsSystem &physics() const { return physicsSystem_; }
+    const PhysicsStats &physicsStats() const { return physicsSystem_.stats(); }
+    bool physicsDebugDraw() const { return physicsDebugDraw_; }
+    void setPhysicsDebugDraw(bool enabled) { physicsDebugDraw_ = enabled; }
+
 private:
     bool init();
     void shutdown();
@@ -92,6 +99,8 @@ private:
     std::unique_ptr<IScene> currentScene_;
     std::unique_ptr<IScene> pendingScene_;
     TilemapSystem tilemapSystem_;
+    PhysicsSystem physicsSystem_;
     RenderSystem renderSystem_;
     RenderQueue renderQueue_;
+    bool physicsDebugDraw_ = false;
 };

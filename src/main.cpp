@@ -40,11 +40,33 @@ static void FillDebugMap(Tilemap &map)
   }
 }
 
+static int CreateObstacle(Engine &engine, float x, float y, int w, int h, unsigned char r, unsigned char g, unsigned char b)
+{
+  auto &e = engine.scene().createEntity();
+  e.transform.x = x;
+  e.transform.y = y;
+  e.rect.w = w;
+  e.rect.h = h;
+  e.rect.r = r;
+  e.rect.g = g;
+  e.rect.b = b;
+  e.rect.a = 255;
+  e.rect.enabled = true;
+  e.sprite.enabled = false;
+  e.collider.enabled = true;
+  e.collider.w = (float)w;
+  e.collider.h = (float)h;
+  e.rigidbody.enabled = true;
+  e.rigidbody.isKinematic = true;
+  return e.id;
+}
+
 static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
 {
   const Time &time = engine.time();
   const RenderStats &stats = engine.renderQueue().stats();
   const Camera2D &cam = engine.camera();
+  const PhysicsStats &physics = engine.physicsStats();
 
   float ms = time.deltaTime() * 1000.0f;
   float fps = time.fps();
@@ -53,6 +75,7 @@ static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
   char line2[256];
   char line3[256];
   char line4[256];
+  char line5[256];
   std::snprintf(line1, sizeof(line1), "[%s] FPS: %.1f  Frame: %.2f ms", sceneName, fps, ms);
   std::snprintf(line2, sizeof(line2), "Draws: %u  Sprites: %u  Batches: %u",
                 stats.rectDraws + stats.spriteDraws, stats.spriteDraws, stats.spriteBatches);
@@ -63,11 +86,13 @@ static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
   std::snprintf(line3, sizeof(line3), "Mouse: %d,%d  World: %.1f,%.1f",
                 engine.input().mouseX(), engine.input().mouseY(), wx, wy);
   std::snprintf(line4, sizeof(line4), "Camera: %.1f,%.1f  Zoom: %.2f", cam.x, cam.y, cam.zoom);
+  std::snprintf(line5, sizeof(line5), "Collisions: %d  ActivePairs: %d", physics.collisions, physics.activePairs);
 
   engine.renderer().drawText(font, line1, 10, 10, 255, 255, 255, 255);
   engine.renderer().drawText(font, line2, 10, 32, 200, 200, 200, 255);
   engine.renderer().drawText(font, line3, 10, 54, 200, 200, 200, 255);
   engine.renderer().drawText(font, line4, 10, 76, 200, 200, 200, 255);
+  engine.renderer().drawText(font, line5, 10, 98, 200, 200, 200, 255);
 }
 
 class DemoScene : public IScene
@@ -91,7 +116,16 @@ public:
     // desligar rect para nao desenhar quadrado
     e.rect.enabled = false;
 
+    e.collider.enabled = true;
+    e.collider.w = 28.0f;
+    e.collider.h = 28.0f;
+    e.rigidbody.enabled = true;
+
     playerId_ = e.id;
+
+    CreateObstacle(engine, 300, 220, 120, 40, 80, 80, 200);
+    CreateObstacle(engine, 500, 380, 40, 160, 80, 200, 120);
+    CreateObstacle(engine, 200, 480, 180, 30, 200, 120, 80);
   }
 
   void onUpdate(Engine &engine, float dt) override
@@ -102,11 +136,11 @@ public:
       return;
 
     Input &input = engine.input();
-    float x = input.getAxis("MoveX");
-    float y = input.getAxis("MoveY");
 
     if (input.pressed("ToggleDebug"))
       engine.setScene(CreateDebugScene());
+    if (input.pressed("ToggleCollision"))
+      engine.setPhysicsDebugDraw(!engine.physicsDebugDraw());
 
     bool zoomInDown = input.down("ZoomIn");
     bool zoomOutDown = input.down("ZoomOut");
@@ -120,16 +154,28 @@ public:
     if (!zoomOutDown && input.pressed("ZoomOut"))
       cam.zoom *= 0.90f;
 
-    float speed = 300.0f;
-    p->transform.x += x * speed * dt;
-    p->transform.y += y * speed * dt;
-
     cam.x = p->transform.x;
     cam.y = p->transform.y;
     if (cam.zoom < 0.1f)
       cam.zoom = 0.1f;
     if (cam.zoom > 6.0f)
       cam.zoom = 6.0f;
+  }
+
+  void onFixedUpdate(Engine &engine, float fixedDt) override
+  {
+    (void)fixedDt;
+    Entity *p = engine.scene().findEntity(playerId_);
+    if (!p)
+      return;
+
+    Input &input = engine.input();
+    float x = input.getAxis("MoveX");
+    float y = input.getAxis("MoveY");
+
+    float speed = 220.0f;
+    p->rigidbody.vx = x * speed;
+    p->rigidbody.vy = y * speed;
   }
 
   void onRenderUI(Engine &engine) override
@@ -168,7 +214,16 @@ public:
 
     e.sprite.enabled = false;
 
+    e.collider.enabled = true;
+    e.collider.w = 40.0f;
+    e.collider.h = 40.0f;
+    e.rigidbody.enabled = true;
+
     playerId_ = e.id;
+
+    CreateObstacle(engine, 260, 180, 80, 80, 200, 80, 120);
+    CreateObstacle(engine, 460, 260, 140, 30, 120, 80, 200);
+    CreateObstacle(engine, 140, 360, 40, 160, 80, 160, 220);
   }
 
   void onUpdate(Engine &engine, float dt) override
@@ -179,11 +234,11 @@ public:
       return;
 
     Input &input = engine.input();
-    float x = input.getAxis("MoveX");
-    float y = input.getAxis("MoveY");
 
     if (input.pressed("ToggleDebug"))
       engine.setScene(CreateDemoScene());
+    if (input.pressed("ToggleCollision"))
+      engine.setPhysicsDebugDraw(!engine.physicsDebugDraw());
 
     bool zoomInDown = input.down("ZoomIn");
     bool zoomOutDown = input.down("ZoomOut");
@@ -197,16 +252,28 @@ public:
     if (!zoomOutDown && input.pressed("ZoomOut"))
       cam.zoom *= 0.90f;
 
-    float speed = 240.0f;
-    p->transform.x += x * speed * dt;
-    p->transform.y += y * speed * dt;
-
     cam.x = p->transform.x;
     cam.y = p->transform.y;
     if (cam.zoom < 0.1f)
       cam.zoom = 0.1f;
     if (cam.zoom > 6.0f)
       cam.zoom = 6.0f;
+  }
+
+  void onFixedUpdate(Engine &engine, float fixedDt) override
+  {
+    (void)fixedDt;
+    Entity *p = engine.scene().findEntity(playerId_);
+    if (!p)
+      return;
+
+    Input &input = engine.input();
+    float x = input.getAxis("MoveX");
+    float y = input.getAxis("MoveY");
+
+    float speed = 200.0f;
+    p->rigidbody.vx = x * speed;
+    p->rigidbody.vy = y * speed;
   }
 
   void onRenderUI(Engine &engine) override

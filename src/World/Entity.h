@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <cstdint>
 
 struct Transform
 {
@@ -24,6 +25,25 @@ struct SpriteRender
     bool enabled = false;
 };
 
+struct ColliderAABB
+{
+    float w = 32.0f;
+    float h = 32.0f;
+    float offsetX = 0.0f;
+    float offsetY = 0.0f;
+    bool isTrigger = false;
+    bool enabled = false;
+    std::uint32_t layerMask = 0xFFFFFFFFu;
+};
+
+struct RigidBody2D
+{
+    float vx = 0.0f;
+    float vy = 0.0f;
+    bool isKinematic = false;
+    bool enabled = false;
+};
+
 struct Entity
 {
     int id = 0;
@@ -34,4 +54,6 @@ struct Entity
     Transform transform;
     RectRender rect;
     SpriteRender sprite;
+    ColliderAABB collider;
+    RigidBody2D rigidbody;
 };

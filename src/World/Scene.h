@@ -8,6 +8,7 @@ class Scene
 public:
     Entity &createEntity();
     Entity *findEntity(int id);
+    std::vector<Entity> &entities() { return entities_; }
     const std::vector<Entity> &entities() const { return entities_; }
 
     Tilemap &createTilemap(int width, int height, int tileSize);

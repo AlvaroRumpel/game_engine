@@ -7,6 +7,7 @@ enum class Key
 {
     Unknown = 0,
     A,
+    C,
     D,
     W,
     S,
