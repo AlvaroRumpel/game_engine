@@ -10,6 +10,8 @@ public:
     Entity *findEntity(int id);
     std::vector<Entity> &entities() { return entities_; }
     const std::vector<Entity> &entities() const { return entities_; }
+    bool destroyEntity(int id);
+    void clearEntities();
 
     Tilemap &createTilemap(int width, int height, int tileSize);
     const std::vector<Tilemap> &tilemaps() const { return tilemaps_; }

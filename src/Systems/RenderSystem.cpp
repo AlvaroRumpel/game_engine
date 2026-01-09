@@ -18,6 +18,7 @@ void RenderSystem::render(Engine &engine, const Scene &scene)
             cmd.y = e.transform.y;
             cmd.texture = e.sprite.texture.get();
             cmd.scale = e.sprite.scale;
+            cmd.rotationDeg = e.sprite.rotationDeg;
             q.submit(cmd);
             continue;
         }

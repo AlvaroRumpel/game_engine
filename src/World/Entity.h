@@ -22,6 +22,7 @@ struct SpriteRender
 {
     std::shared_ptr<Texture> texture;
     float scale = 1.0f;
+    float rotationDeg = 0.0f;
     bool enabled = false;
 };
 

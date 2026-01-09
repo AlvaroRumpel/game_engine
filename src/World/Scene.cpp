@@ -35,3 +35,22 @@ void Scene::clear()
     nextEntityId_ = 1;
     tilemaps_.clear();
 }
+
+void Scene::clearEntities()
+{
+    entities_.clear();
+    nextEntityId_ = 1;
+}
+
+bool Scene::destroyEntity(int id)
+{
+    for (size_t i = 0; i < entities_.size(); ++i)
+    {
+        if (entities_[i].id == id)
+        {
+            entities_.erase(entities_.begin() + (long)i);
+            return true;
+        }
+    }
+    return false;
+}

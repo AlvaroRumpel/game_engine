@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -351,31 +352,313 @@ static bool PickEntityAt(Scene &scene, float wx, float wy, int &outId)
     return false;
 }
 
-static void DrawSplitter(bool vertical, float thickness, float &value, float minVal, float maxVal, float direction)
+static float SnapValue(float v, float step)
 {
-    ImVec2 pos = ImGui::GetCursorScreenPos();
-    ImVec2 size = ImGui::GetContentRegionAvail();
-    ImGui::InvisibleButton("##splitter", size);
-    bool active = ImGui::IsItemActive();
-    if (active)
+    if (step <= 0.0f)
+        return v;
+    float inv = 1.0f / step;
+    return std::round(v * inv) / inv;
+}
+
+static bool SaveScene(const Scene &scene, const Camera2D &cam, const std::string &path)
+{
+    std::ofstream out(path, std::ios::trunc);
+    if (!out.is_open())
+        return false;
+
+    out << "{\n";
+    out << "  \"camera\": {\"x\": " << cam.x << ", \"y\": " << cam.y << ", \"zoom\": " << cam.zoom << "},\n";
+    out << "  \"entities\": [\n";
+
+    const auto &entities = scene.entities();
+    for (size_t i = 0; i < entities.size(); ++i)
     {
-        ImVec2 delta = ImGui::GetIO().MouseDelta;
-        if (vertical)
-            value += delta.x * direction;
-        else
-            value += delta.y * direction;
-        if (value < minVal)
-            value = minVal;
-        if (value > maxVal)
-            value = maxVal;
+        const auto &e = entities[i];
+        out << "    {\n";
+        out << "      \"id\": " << e.id << ",\n";
+        out << "      \"x\": " << e.transform.x << ", \"y\": " << e.transform.y << ",\n";
+        out << "      \"rect\": {\"enabled\": " << (e.rect.enabled ? "true" : "false")
+            << ", \"w\": " << e.rect.w << ", \"h\": " << e.rect.h
+            << ", \"r\": " << (int)e.rect.r << ", \"g\": " << (int)e.rect.g
+            << ", \"b\": " << (int)e.rect.b << ", \"a\": " << (int)e.rect.a << "},\n";
+        out << "      \"sprite\": {\"enabled\": " << (e.sprite.enabled ? "true" : "false")
+            << ", \"scale\": " << e.sprite.scale << ", \"rot\": " << e.sprite.rotationDeg;
+        if (e.sprite.texture)
+            out << ", \"path\": \"" << e.sprite.texture->path() << "\"";
+        out << "},\n";
+        out << "      \"collider\": {\"enabled\": " << (e.collider.enabled ? "true" : "false")
+            << ", \"w\": " << e.collider.w << ", \"h\": " << e.collider.h
+            << ", \"offX\": " << e.collider.offsetX << ", \"offY\": " << e.collider.offsetY
+            << ", \"trigger\": " << (e.collider.isTrigger ? "true" : "false") << "},\n";
+        out << "      \"rigidbody\": {\"enabled\": " << (e.rigidbody.enabled ? "true" : "false")
+            << ", \"vx\": " << e.rigidbody.vx << ", \"vy\": " << e.rigidbody.vy
+            << ", \"kin\": " << (e.rigidbody.isKinematic ? "true" : "false") << "}\n";
+        out << "    }";
+        if (i + 1 < entities.size())
+            out << ",";
+        out << "\n";
     }
 
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    ImU32 col = ImGui::GetColorU32(ImGuiCol_Separator);
-    if (vertical)
-        dl->AddLine(pos, ImVec2(pos.x, pos.y + size.y), col, 1.0f);
-    else
-        dl->AddLine(pos, ImVec2(pos.x + size.x, pos.y), col, 1.0f);
+    out << "  ]\n";
+    out << "}\n";
+    return true;
+}
+
+static bool ExtractValue(const std::string &line, const std::string &key, std::string &out)
+{
+    size_t pos = line.find(key);
+    if (pos == std::string::npos)
+        return false;
+    pos = line.find(':', pos);
+    if (pos == std::string::npos)
+        return false;
+    pos += 1;
+    while (pos < line.size() && (line[pos] == ' ' || line[pos] == '\t'))
+        pos++;
+    size_t end = pos;
+    while (end < line.size() && line[end] != ',' && line[end] != '}' && line[end] != '\r' && line[end] != '\n')
+        end++;
+    out = line.substr(pos, end - pos);
+    return true;
+}
+
+static bool ParseBool(const std::string &s)
+{
+    return s.find("true") != std::string::npos;
+}
+
+static float ParseFloat(const std::string &s)
+{
+    return std::strtof(s.c_str(), nullptr);
+}
+
+static int ParseInt(const std::string &s)
+{
+    return std::atoi(s.c_str());
+}
+
+struct EntitySnapshot
+{
+    float x = 0.0f;
+    float y = 0.0f;
+
+    bool rectEnabled = false;
+    int rectW = 0;
+    int rectH = 0;
+    int rectR = 255, rectG = 255, rectB = 255, rectA = 255;
+
+    bool spriteEnabled = false;
+    float spriteScale = 1.0f;
+    float spriteRot = 0.0f;
+    std::string spritePath;
+
+    bool colliderEnabled = false;
+    float colW = 0.0f;
+    float colH = 0.0f;
+    float colOffX = 0.0f;
+    float colOffY = 0.0f;
+    bool colTrigger = false;
+
+    bool rbEnabled = false;
+    float rbVx = 0.0f;
+    float rbVy = 0.0f;
+    bool rbKin = false;
+};
+
+static bool LoadScene(Scene &scene, AssetManager &assets, Camera2D &cam, const std::string &path)
+{
+    std::ifstream file(path);
+    if (!file.is_open())
+        return false;
+
+    std::vector<EntitySnapshot> list;
+    EntitySnapshot current{};
+    bool inEntity = false;
+    enum class Section
+    {
+        None,
+        Entity,
+        Rect,
+        Sprite,
+        Collider,
+        RigidBody
+    } section = Section::None;
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        std::string v;
+        if (line.find("\"camera\"") != std::string::npos)
+        {
+            section = Section::None;
+        }
+        if (line.find("\"camera\"") != std::string::npos)
+        {
+            if (ExtractValue(line, "\"x\"", v))
+                cam.x = ParseFloat(v);
+            if (ExtractValue(line, "\"y\"", v))
+                cam.y = ParseFloat(v);
+            if (ExtractValue(line, "\"zoom\"", v))
+                cam.zoom = ParseFloat(v);
+        }
+
+        if (line.find("{") != std::string::npos && line.find("\"id\"") != std::string::npos)
+        {
+            current = EntitySnapshot{};
+            section = Section::Entity;
+            inEntity = true;
+        }
+        if (!inEntity)
+            continue;
+
+        if (line.find("\"rect\"") != std::string::npos)
+            section = Section::Rect;
+        else if (line.find("\"sprite\"") != std::string::npos)
+            section = Section::Sprite;
+        else if (line.find("\"collider\"") != std::string::npos)
+            section = Section::Collider;
+        else if (line.find("\"rigidbody\"") != std::string::npos)
+            section = Section::RigidBody;
+
+        if (section == Section::Entity)
+        {
+            if (ExtractValue(line, "\"x\"", v))
+                current.x = ParseFloat(v);
+            if (ExtractValue(line, "\"y\"", v))
+                current.y = ParseFloat(v);
+        }
+        else if (section == Section::Rect)
+        {
+            if (ExtractValue(line, "\"enabled\"", v))
+                current.rectEnabled = ParseBool(v);
+            if (ExtractValue(line, "\"w\"", v))
+                current.rectW = ParseInt(v);
+            if (ExtractValue(line, "\"h\"", v))
+                current.rectH = ParseInt(v);
+            if (ExtractValue(line, "\"r\"", v))
+                current.rectR = ParseInt(v);
+            if (ExtractValue(line, "\"g\"", v))
+                current.rectG = ParseInt(v);
+            if (ExtractValue(line, "\"b\"", v))
+                current.rectB = ParseInt(v);
+            if (ExtractValue(line, "\"a\"", v))
+                current.rectA = ParseInt(v);
+        }
+        else if (section == Section::Sprite)
+        {
+            if (ExtractValue(line, "\"enabled\"", v))
+                current.spriteEnabled = ParseBool(v);
+            if (ExtractValue(line, "\"scale\"", v))
+                current.spriteScale = ParseFloat(v);
+            if (ExtractValue(line, "\"rot\"", v))
+                current.spriteRot = ParseFloat(v);
+            if (ExtractValue(line, "\"path\"", v))
+            {
+                if (!v.empty() && v.front() == '\"')
+                    v.erase(0, 1);
+                if (!v.empty() && v.back() == '\"')
+                    v.pop_back();
+                current.spritePath = v;
+            }
+        }
+        else if (section == Section::Collider)
+        {
+            if (ExtractValue(line, "\"enabled\"", v))
+                current.colliderEnabled = ParseBool(v);
+            if (ExtractValue(line, "\"w\"", v))
+                current.colW = ParseFloat(v);
+            if (ExtractValue(line, "\"h\"", v))
+                current.colH = ParseFloat(v);
+            if (ExtractValue(line, "\"offX\"", v))
+                current.colOffX = ParseFloat(v);
+            if (ExtractValue(line, "\"offY\"", v))
+                current.colOffY = ParseFloat(v);
+            if (ExtractValue(line, "\"trigger\"", v))
+                current.colTrigger = ParseBool(v);
+        }
+        else if (section == Section::RigidBody)
+        {
+            if (ExtractValue(line, "\"enabled\"", v))
+                current.rbEnabled = ParseBool(v);
+            if (ExtractValue(line, "\"vx\"", v))
+                current.rbVx = ParseFloat(v);
+            if (ExtractValue(line, "\"vy\"", v))
+                current.rbVy = ParseFloat(v);
+            if (ExtractValue(line, "\"kin\"", v))
+                current.rbKin = ParseBool(v);
+        }
+
+        if (line.find("}") != std::string::npos && inEntity && section == Section::RigidBody)
+        {
+            list.push_back(current);
+            inEntity = false;
+            section = Section::None;
+        }
+    }
+
+    scene.clearEntities();
+    for (const auto &snap : list)
+    {
+        Entity &e = scene.createEntity();
+        e.transform.x = snap.x;
+        e.transform.y = snap.y;
+
+        e.rect.enabled = snap.rectEnabled;
+        e.rect.w = snap.rectW;
+        e.rect.h = snap.rectH;
+        e.rect.r = (unsigned char)snap.rectR;
+        e.rect.g = (unsigned char)snap.rectG;
+        e.rect.b = (unsigned char)snap.rectB;
+        e.rect.a = (unsigned char)snap.rectA;
+
+        e.sprite.enabled = snap.spriteEnabled;
+        e.sprite.scale = snap.spriteScale;
+        e.sprite.rotationDeg = snap.spriteRot;
+        if (!snap.spritePath.empty())
+            e.sprite.texture = assets.loadTexture(snap.spritePath);
+        else
+            e.sprite.texture.reset();
+
+        e.collider.enabled = snap.colliderEnabled;
+        e.collider.w = snap.colW;
+        e.collider.h = snap.colH;
+        e.collider.offsetX = snap.colOffX;
+        e.collider.offsetY = snap.colOffY;
+        e.collider.isTrigger = snap.colTrigger;
+
+        e.rigidbody.enabled = snap.rbEnabled;
+        e.rigidbody.vx = snap.rbVx;
+        e.rigidbody.vy = snap.rbVy;
+        e.rigidbody.isKinematic = snap.rbKin;
+    }
+
+    return true;
+}
+static void ApplyEditorStyle()
+{
+    ImGuiStyle &style = ImGui::GetStyle();
+    style.WindowRounding = 6.0f;
+    style.FrameRounding = 4.0f;
+    style.ScrollbarRounding = 6.0f;
+    style.GrabRounding = 4.0f;
+    style.WindowPadding = ImVec2(10, 8);
+    style.FramePadding = ImVec2(8, 4);
+    style.ItemSpacing = ImVec2(8, 6);
+
+    ImVec4 *colors = style.Colors;
+    colors[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.09f, 0.10f, 1.00f);
+    colors[ImGuiCol_Header] = ImVec4(0.18f, 0.22f, 0.28f, 1.00f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.30f, 0.38f, 1.00f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.32f, 0.38f, 0.48f, 1.00f);
+    colors[ImGuiCol_Button] = ImVec4(0.18f, 0.22f, 0.28f, 1.00f);
+    colors[ImGuiCol_ButtonHovered] = ImVec4(0.26f, 0.32f, 0.40f, 1.00f);
+    colors[ImGuiCol_ButtonActive] = ImVec4(0.34f, 0.40f, 0.50f, 1.00f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.14f, 0.16f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.24f, 0.30f, 1.00f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.24f, 0.30f, 0.38f, 1.00f);
+    colors[ImGuiCol_Separator] = ImVec4(0.20f, 0.22f, 0.25f, 1.00f);
+    colors[ImGuiCol_SeparatorHovered] = ImVec4(0.30f, 0.34f, 0.40f, 1.00f);
+    colors[ImGuiCol_SeparatorActive] = ImVec4(0.36f, 0.42f, 0.50f, 1.00f);
 }
 
 int main()
@@ -393,12 +676,22 @@ int main()
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::StyleColorsDark();
+    ImGuiIO &io = ImGui::GetIO();
+#ifdef IMGUI_HAS_DOCK
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+#endif
+    ApplyEditorStyle();
 
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
 
-    bool simulate = false;
+    enum class PlayState
+    {
+        Stopped,
+        Playing,
+        Paused
+    };
+    PlayState playState = PlayState::Stopped;
     std::string selectedPath;
     int selectedEntityId = 0;
     std::string importStatus = "Drop files into the window to import.";
@@ -417,14 +710,27 @@ int main()
     ImVec2 lastGameViewMax(0.0f, 0.0f);
     bool draggingMove = false;
     bool draggingScale = false;
+    bool draggingRotate = false;
     int dragEntityId = 0;
     float dragOffsetX = 0.0f;
     float dragOffsetY = 0.0f;
     BoundsType dragType = BoundsType::None;
-    float leftPanelW = 280.0f;
-    float rightPanelW = 280.0f;
-    float consoleH = 120.0f;
-    float toolbarH = 40.0f;
+    float dragStartRot = 0.0f;
+    float dragStartAngle = 0.0f;
+    bool snapEnabled = true;
+    float snapMove = 16.0f;
+    float snapScale = 8.0f;
+    float snapRotate = 15.0f;
+    bool camFollowEntity = false;
+    bool camLockPos = false;
+    int camFollowId = 0;
+    float camLockX = 0.0f;
+    float camLockY = 0.0f;
+    bool savedOk = false;
+    char savePathBuf[256] = "assets/editor_scene.json";
+    bool dockInitialized = false;
+    std::vector<EntitySnapshot> playSnapshot;
+    Camera2D playSnapshotCam{};
 
     Uint32 lastTicks = SDL_GetTicks();
 
@@ -451,7 +757,7 @@ int main()
             else
             {
                 ImGuiIO &io = ImGui::GetIO();
-                bool allowGameInput = simulate && gameViewInputActive;
+                bool allowGameInput = (playState == PlayState::Playing) && gameViewInputActive;
                 if (!io.WantCaptureKeyboard && !io.WantCaptureMouse)
                     engine.handleEvent(e);
                 else if (allowGameInput)
@@ -467,76 +773,202 @@ int main()
         float rawDt = (nowTicks - lastTicks) / 1000.0f;
         lastTicks = nowTicks;
 
-        engine.tick(simulate ? rawDt : 0.0f);
+        engine.tick((playState == PlayState::Playing) ? rawDt : 0.0f);
+
+        if (playState != PlayState::Playing)
+        {
+            Camera2D &cam = engine.camera();
+            float camSpeed = 400.0f;
+            if (gameViewInputActive)
+            {
+                float ix = engine.input().getAxis("MoveX");
+                float iy = engine.input().getAxis("MoveY");
+                cam.x += ix * camSpeed * rawDt;
+                cam.y += iy * camSpeed * rawDt;
+            }
+
+            if (camFollowEntity)
+            {
+                Entity *e = engine.scene().findEntity(camFollowId);
+                if (e)
+                {
+                    cam.x = e->transform.x;
+                    cam.y = e->transform.y;
+                }
+            }
+            else if (camLockPos)
+            {
+                cam.x = camLockX;
+                cam.y = camLockY;
+            }
+        }
 
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        int winW = 800;
-        int winH = 600;
-        SDL_GetWindowSize(window, &winW, &winH);
+        Scene &scene = engine.scene();
 
-        const float minPanelW = 200.0f;
-        const float minConsoleH = 80.0f;
-        const float minGameW = 300.0f;
-        const float minGameH = 200.0f;
+#ifdef IMGUI_HAS_DOCK
+        ImGuiViewport *viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->Pos);
+        ImGui::SetNextWindowSize(viewport->Size);
+        ImGui::SetNextWindowViewport(viewport->ID);
+        ImGuiWindowFlags dockFlags = ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar |
+                                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                                     ImGuiWindowFlags_NoNavFocus;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::Begin("DockSpace", nullptr, dockFlags);
+        ImGui::PopStyleVar(2);
 
-        float maxPanelW = (float)winW * 0.45f;
-        if (leftPanelW < minPanelW)
-            leftPanelW = minPanelW;
-        if (rightPanelW < minPanelW)
-            rightPanelW = minPanelW;
-        if (leftPanelW > maxPanelW)
-            leftPanelW = maxPanelW;
-        if (rightPanelW > maxPanelW)
-            rightPanelW = maxPanelW;
-        if (consoleH < minConsoleH)
-            consoleH = minConsoleH;
-        if (consoleH > (float)winH * 0.5f)
-            consoleH = (float)winH * 0.5f;
+        ImGuiID dockId = ImGui::GetID("EditorDockspace");
+        ImGui::DockSpace(dockId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
 
-        ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2((float)winW, toolbarH));
-        ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-        if (ImGui::Button(simulate ? "Stop" : "Play"))
+        if (!dockInitialized)
         {
-            if (simulate)
+            dockInitialized = true;
+            ImGui::DockBuilderRemoveNode(dockId);
+            ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockId, viewport->Size);
+
+            ImGuiID dockMain = dockId;
+            ImGuiID dockTop = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Up, 0.08f, nullptr, &dockMain);
+            ImGuiID dockBottom = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.20f, nullptr, &dockMain);
+            ImGuiID dockLeft = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.22f, nullptr, &dockMain);
+            ImGuiID dockRight = ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.22f, nullptr, &dockMain);
+
+            ImGui::DockBuilderDockWindow("Toolbar", dockTop);
+            ImGui::DockBuilderDockWindow("Project", dockLeft);
+            ImGui::DockBuilderDockWindow("Inspector", dockRight);
+            ImGui::DockBuilderDockWindow("Console", dockBottom);
+            ImGui::DockBuilderDockWindow("Game View", dockMain);
+            ImGui::DockBuilderDockWindow("Camera", dockRight);
+
+            ImGui::DockBuilderFinish(dockId);
+        }
+
+        ImGui::End();
+#endif
+
+        ImGuiViewport *viewport = ImGui::GetMainViewport();
+        ImVec2 vpPos = viewport->Pos;
+        ImVec2 vpSize = viewport->Size;
+        ImGui::SetNextWindowPos(ImVec2(vpPos.x, vpPos.y), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(vpSize.x, 60.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Toolbar", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::InputText("Save Path", savePathBuf, sizeof(savePathBuf));
+        if (ImGui::Button(playState == PlayState::Playing ? "Stop" : "Play"))
+        {
+            if (playState == PlayState::Playing || playState == PlayState::Paused)
             {
-                simulate = false;
-                engine.setScene(CreateDemoScene());
-                engine.tick(0.0f);
+                playState = PlayState::Stopped;
+                scene.clearEntities();
+                for (const auto &snap : playSnapshot)
+                {
+                    Entity &e = scene.createEntity();
+                    e.transform.x = snap.x;
+                    e.transform.y = snap.y;
+                    e.rect.enabled = snap.rectEnabled;
+                    e.rect.w = snap.rectW;
+                    e.rect.h = snap.rectH;
+                    e.rect.r = (unsigned char)snap.rectR;
+                    e.rect.g = (unsigned char)snap.rectG;
+                    e.rect.b = (unsigned char)snap.rectB;
+                    e.rect.a = (unsigned char)snap.rectA;
+                    e.sprite.enabled = snap.spriteEnabled;
+                    e.sprite.scale = snap.spriteScale;
+                    e.sprite.rotationDeg = snap.spriteRot;
+                    if (!snap.spritePath.empty())
+                        e.sprite.texture = engine.assets().loadTexture(snap.spritePath);
+                    else
+                        e.sprite.texture.reset();
+                    e.collider.enabled = snap.colliderEnabled;
+                    e.collider.w = snap.colW;
+                    e.collider.h = snap.colH;
+                    e.collider.offsetX = snap.colOffX;
+                    e.collider.offsetY = snap.colOffY;
+                    e.collider.isTrigger = snap.colTrigger;
+                    e.rigidbody.enabled = snap.rbEnabled;
+                    e.rigidbody.vx = snap.rbVx;
+                    e.rigidbody.vy = snap.rbVy;
+                    e.rigidbody.isKinematic = snap.rbKin;
+                }
+                engine.camera() = playSnapshotCam;
             }
             else
             {
-                simulate = true;
+                playSnapshot.clear();
+                for (const auto &e : scene.entities())
+                {
+                    EntitySnapshot snap{};
+                    snap.x = e.transform.x;
+                    snap.y = e.transform.y;
+                    snap.rectEnabled = e.rect.enabled;
+                    snap.rectW = e.rect.w;
+                    snap.rectH = e.rect.h;
+                    snap.rectR = e.rect.r;
+                    snap.rectG = e.rect.g;
+                    snap.rectB = e.rect.b;
+                    snap.rectA = e.rect.a;
+                    snap.spriteEnabled = e.sprite.enabled;
+                    snap.spriteScale = e.sprite.scale;
+                    snap.spriteRot = e.sprite.rotationDeg;
+                    if (e.sprite.texture)
+                        snap.spritePath = e.sprite.texture->path();
+                    snap.colliderEnabled = e.collider.enabled;
+                    snap.colW = e.collider.w;
+                    snap.colH = e.collider.h;
+                    snap.colOffX = e.collider.offsetX;
+                    snap.colOffY = e.collider.offsetY;
+                    snap.colTrigger = e.collider.isTrigger;
+                    snap.rbEnabled = e.rigidbody.enabled;
+                    snap.rbVx = e.rigidbody.vx;
+                    snap.rbVy = e.rigidbody.vy;
+                    snap.rbKin = e.rigidbody.isKinematic;
+                    playSnapshot.push_back(snap);
+                }
+                playSnapshotCam = engine.camera();
+                playState = PlayState::Playing;
             }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(playState == PlayState::Paused ? "Resume" : "Pause"))
+        {
+            if (playState == PlayState::Playing)
+                playState = PlayState::Paused;
+            else if (playState == PlayState::Paused)
+                playState = PlayState::Playing;
         }
         ImGui::SameLine();
         if (ImGui::Button("Reset"))
         {
             engine.setScene(CreateDemoScene());
             engine.tick(0.0f);
+            camFollowEntity = false;
+            camLockPos = false;
+            playState = PlayState::Stopped;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Save"))
+        {
+            savedOk = SaveScene(engine.scene(), engine.camera(), savePathBuf);
+            importStatus = savedOk ? "Scene saved." : "Failed to save scene.";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load"))
+        {
+            bool ok = LoadScene(scene, engine.assets(), engine.camera(), savePathBuf);
+            importStatus = ok ? "Scene loaded." : "Failed to load scene.";
+            playState = PlayState::Stopped;
         }
         ImGui::Text("FPS: %.1f", engine.time().fps());
         ImGui::End();
 
-        float contentY = toolbarH;
-        float contentH = (float)winH - toolbarH - consoleH;
-        if (contentH < minGameH)
-            contentH = minGameH;
-        float gameW = (float)winW - leftPanelW - rightPanelW;
-        if (gameW < minGameW)
-        {
-            float deficit = minGameW - gameW;
-            leftPanelW = std::max(minPanelW, leftPanelW - deficit * 0.5f);
-            rightPanelW = std::max(minPanelW, rightPanelW - deficit * 0.5f);
-            gameW = (float)winW - leftPanelW - rightPanelW;
-        }
-
-        ImGui::SetNextWindowPos(ImVec2(0, contentY));
-        ImGui::SetNextWindowSize(ImVec2(leftPanelW, contentH));
-        ImGui::Begin("Project", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+        ImGui::SetNextWindowPos(ImVec2(vpPos.x, vpPos.y + 70.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(320.0f, vpSize.y - 220.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Project", nullptr, ImGuiWindowFlags_NoCollapse);
         ImGui::Text("assets/");
         DrawFileTree("assets", selectedPath);
         ImGui::Separator();
@@ -626,10 +1058,26 @@ int main()
 
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2((float)winW - rightPanelW, contentY));
-        ImGui::SetNextWindowSize(ImVec2(rightPanelW, contentH));
-        ImGui::Begin("Inspector", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+        ImGui::SetNextWindowPos(ImVec2(vpPos.x + vpSize.x - 320.0f, vpPos.y + 70.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(320.0f, vpSize.y - 220.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Inspector", nullptr, ImGuiWindowFlags_NoCollapse);
         ImGui::Text("Entities");
+        if (ImGui::Button("Add Entity"))
+        {
+            Entity &e = engine.scene().createEntity();
+            e.transform.x = engine.camera().x;
+            e.transform.y = engine.camera().y;
+            e.rect.enabled = true;
+            e.rect.w = 32;
+            e.rect.h = 32;
+            selectedEntityId = e.id;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete") && selectedEntityId != 0)
+        {
+            engine.scene().destroyEntity(selectedEntityId);
+            selectedEntityId = 0;
+        }
         for (const auto &e : engine.scene().entities())
         {
             std::string label = "Entity " + std::to_string(e.id);
@@ -655,6 +1103,7 @@ int main()
             ImGui::Text("SpriteRender");
             ImGui::Checkbox("Sprite Enabled", &selected->sprite.enabled);
             ImGui::InputFloat("Sprite Scale", &selected->sprite.scale);
+            ImGui::InputFloat("Sprite Rotation", &selected->sprite.rotationDeg);
 
             ImGui::Separator();
             ImGui::Text("Collider");
@@ -672,11 +1121,25 @@ int main()
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(leftPanelW, contentY));
-        ImGui::SetNextWindowSize(ImVec2(gameW, contentH));
-        ImGui::Begin("Game View", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
-        ImGui::Text("Simulation: %s", simulate ? "Running" : "Stopped");
+        ImGui::SetNextWindowPos(ImVec2(vpPos.x + 330.0f, vpPos.y + 70.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(vpSize.x - 660.0f, vpSize.y - 240.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Game View", nullptr, ImGuiWindowFlags_NoCollapse);
+        const char *simLabel = "Stopped";
+        if (playState == PlayState::Playing)
+            simLabel = "Running";
+        else if (playState == PlayState::Paused)
+            simLabel = "Paused";
+        ImGui::Text("Simulation: %s", simLabel);
         Camera2D &cam = engine.camera();
+        if (playState != PlayState::Playing)
+        {
+            ImGui::SameLine();
+            if (ImGui::Button("Center Cam"))
+            {
+                cam.x = 0.0f;
+                cam.y = 0.0f;
+            }
+        }
         ImVec2 avail = ImGui::GetContentRegionAvail();
         int desiredW = (int)avail.x;
         int desiredH = (int)avail.y;
@@ -720,27 +1183,42 @@ int main()
             gameViewHovered = ImGui::IsItemHovered();
             gameViewFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
-            if (gameViewHovered)
+        if (gameViewHovered)
+        {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            float localX = mousePos.x - imgMin.x;
+            float localY = mousePos.y - imgMin.y;
+            if (localX >= 0.0f && localY >= 0.0f && localX <= (float)sceneTexW && localY <= (float)sceneTexH)
             {
-                ImVec2 mousePos = ImGui::GetMousePos();
-                float localX = mousePos.x - imgMin.x;
-                float localY = mousePos.y - imgMin.y;
-                if (localX >= 0.0f && localY >= 0.0f && localX <= (float)sceneTexW && localY <= (float)sceneTexH)
+                ScreenToWorld(cam, localX, localY, sceneTexW, sceneTexH, mouseWorldX, mouseWorldY);
+                haveMouseWorld = true;
+                if (!draggingMove && !draggingScale && !draggingRotate && ImGui::IsMouseClicked(0))
                 {
-                    ScreenToWorld(cam, localX, localY, sceneTexW, sceneTexH, mouseWorldX, mouseWorldY);
-                    haveMouseWorld = true;
-                    if (!draggingMove && !draggingScale && ImGui::IsMouseClicked(0))
-                    {
-                        int pickedId = 0;
-                        if (PickEntityAt(engine.scene(), mouseWorldX, mouseWorldY, pickedId))
-                            selectedEntityId = pickedId;
-                    }
+                    int pickedId = 0;
+                    if (PickEntityAt(engine.scene(), mouseWorldX, mouseWorldY, pickedId))
+                        selectedEntityId = pickedId;
+                }
+                if (playState != PlayState::Playing && ImGui::IsMouseDragging(1))
+                {
+                    ImVec2 delta = ImGui::GetIO().MouseDelta;
+                    cam.x -= delta.x / cam.zoom;
+                    cam.y -= delta.y / cam.zoom;
+                }
+                if (playState != PlayState::Playing && ImGui::GetIO().MouseWheel != 0.0f)
+                {
+                    float zoomFactor = (ImGui::GetIO().MouseWheel > 0.0f) ? 1.1f : 0.9f;
+                    cam.zoom *= zoomFactor;
+                    if (cam.zoom < 0.1f)
+                        cam.zoom = 0.1f;
                 }
             }
         }
+        }
 
-        ImGui::Separator();
-        ImGui::Text("Camera");
+        ImGui::End();
+
+        ImGui::Begin("Camera", nullptr, ImGuiWindowFlags_NoCollapse);
+        ImGui::Text("View");
         ImGui::InputFloat("Cam X", &cam.x);
         ImGui::InputFloat("Cam Y", &cam.y);
         ImGui::InputFloat("Zoom", &cam.zoom);
@@ -748,6 +1226,37 @@ int main()
             cam.zoom = 0.1f;
         if (haveMouseWorld)
             ImGui::Text("Mouse World: %.1f, %.1f", mouseWorldX, mouseWorldY);
+        ImGui::Separator();
+        ImGui::Text("Gizmo");
+        ImGui::Checkbox("Snap", &snapEnabled);
+        ImGui::SameLine();
+        ImGui::InputFloat("Move Step", &snapMove);
+        ImGui::SameLine();
+        ImGui::InputFloat("Scale Step", &snapScale);
+        ImGui::SameLine();
+        ImGui::InputFloat("Rotate Step", &snapRotate);
+        ImGui::Separator();
+        ImGui::Text("Camera Lock");
+        if (ImGui::Button("Follow Selected") && selectedEntityId != 0)
+        {
+            camFollowEntity = true;
+            camLockPos = false;
+            camFollowId = selectedEntityId;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Lock Position"))
+        {
+            camLockPos = true;
+            camFollowEntity = false;
+            camLockX = cam.x;
+            camLockY = cam.y;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Unlock"))
+        {
+            camFollowEntity = false;
+            camLockPos = false;
+        }
         ImGui::End();
 
         if (sceneTexture && selectedEntityId != 0)
@@ -778,9 +1287,14 @@ int main()
                 ImVec2 scaleMax(p1.x + handleSize.x, p1.y + handleSize.y);
                 dl->AddRectFilled(scaleMin, scaleMax, IM_COL32(200, 200, 80, 220));
 
+                ImVec2 rotCenter((p0.x + p1.x) * 0.5f, p0.y - 18.0f);
+                float rotRadius = 6.0f;
+                dl->AddCircleFilled(rotCenter, rotRadius, IM_COL32(200, 120, 240, 220));
+
                 ImVec2 mousePos = ImGui::GetMousePos();
                 bool overMove = mousePos.x >= moveMin.x && mousePos.x <= moveMax.x && mousePos.y >= moveMin.y && mousePos.y <= moveMax.y;
                 bool overScale = mousePos.x >= scaleMin.x && mousePos.x <= scaleMax.x && mousePos.y >= scaleMin.y && mousePos.y <= scaleMax.y;
+                bool overRotate = (std::abs(mousePos.x - rotCenter.x) <= rotRadius && std::abs(mousePos.y - rotCenter.y) <= rotRadius);
 
                 if (gameViewHovered && ImGui::IsMouseClicked(0))
                 {
@@ -788,6 +1302,7 @@ int main()
                     {
                         draggingMove = true;
                         draggingScale = false;
+                        draggingRotate = false;
                         dragEntityId = selectedEntityId;
                         dragOffsetX = mouseWorldX - selectedEnt->transform.x;
                         dragOffsetY = mouseWorldY - selectedEnt->transform.y;
@@ -796,15 +1311,38 @@ int main()
                     {
                         draggingScale = true;
                         draggingMove = false;
+                        draggingRotate = false;
                         dragEntityId = selectedEntityId;
                         dragType = btype;
+                    }
+                    else if (overRotate && btype == BoundsType::Sprite)
+                    {
+                        draggingRotate = true;
+                        draggingMove = false;
+                        draggingScale = false;
+                        dragEntityId = selectedEntityId;
+                        dragStartRot = selectedEnt->sprite.rotationDeg;
+                        dragStartAngle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
                     }
                 }
 
                 if (draggingMove && dragEntityId == selectedEntityId && haveMouseWorld)
                 {
-                    selectedEnt->transform.x = mouseWorldX - dragOffsetX;
-                    selectedEnt->transform.y = mouseWorldY - dragOffsetY;
+                    float newX = mouseWorldX - dragOffsetX;
+                    float newY = mouseWorldY - dragOffsetY;
+                    bool lockX = ImGui::GetIO().KeyShift;
+                    bool lockY = ImGui::GetIO().KeyCtrl;
+                    if (lockX)
+                        newY = selectedEnt->transform.y;
+                    if (lockY)
+                        newX = selectedEnt->transform.x;
+                    if (snapEnabled)
+                    {
+                        newX = SnapValue(newX, snapMove);
+                        newY = SnapValue(newY, snapMove);
+                    }
+                    selectedEnt->transform.x = newX;
+                    selectedEnt->transform.y = newY;
                     if (ImGui::IsMouseReleased(0))
                         draggingMove = false;
                 }
@@ -816,6 +1354,12 @@ int main()
                         newW = 1.0f;
                     if (newH < 1.0f)
                         newH = 1.0f;
+
+                    if (snapEnabled)
+                    {
+                        newW = SnapValue(newW, snapScale);
+                        newH = SnapValue(newH, snapScale);
+                    }
 
                     if (dragType == BoundsType::Rect)
                     {
@@ -842,37 +1386,27 @@ int main()
                     if (ImGui::IsMouseReleased(0))
                         draggingScale = false;
                 }
+                else if (draggingRotate && dragEntityId == selectedEntityId && haveMouseWorld)
+                {
+                    float angle = std::atan2(mouseWorldY - (by + bh * 0.5f), mouseWorldX - (bx + bw * 0.5f));
+                    float delta = angle - dragStartAngle;
+                    float deg = dragStartRot + (delta * 180.0f / 3.14159265f);
+                    if (snapEnabled)
+                        deg = SnapValue(deg, snapRotate);
+                    selectedEnt->sprite.rotationDeg = deg;
+                    if (ImGui::IsMouseReleased(0))
+                        draggingRotate = false;
+                }
             }
         }
 
-        ImGui::SetNextWindowPos(ImVec2(0, (float)winH - consoleH));
-        ImGui::SetNextWindowSize(ImVec2((float)winW, consoleH));
-        ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+        ImGui::SetNextWindowPos(ImVec2(vpPos.x, vpPos.y + vpSize.y - 140.0f), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(vpSize.x, 140.0f), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Console", nullptr, ImGuiWindowFlags_NoCollapse);
         ImGui::TextWrapped("%s", importStatus.c_str());
         ImGui::End();
 
-        gameViewInputActive = (gameViewHovered || gameViewFocused) && !(draggingMove || draggingScale);
-
-        ImGui::SetNextWindowPos(ImVec2(leftPanelW - 3.0f, contentY));
-        ImGui::SetNextWindowSize(ImVec2(6.0f, contentH));
-        ImGui::Begin("##split_left", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                                              ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-        DrawSplitter(true, 6.0f, leftPanelW, minPanelW, (float)winW - rightPanelW - minGameW, 1.0f);
-        ImGui::End();
-
-        ImGui::SetNextWindowPos(ImVec2((float)winW - rightPanelW - 3.0f, contentY));
-        ImGui::SetNextWindowSize(ImVec2(6.0f, contentH));
-        ImGui::Begin("##split_right", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                                               ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-        DrawSplitter(true, 6.0f, rightPanelW, minPanelW, (float)winW - leftPanelW - minGameW, -1.0f);
-        ImGui::End();
-
-        ImGui::SetNextWindowPos(ImVec2(0, (float)winH - consoleH - 3.0f));
-        ImGui::SetNextWindowSize(ImVec2((float)winW, 6.0f));
-        ImGui::Begin("##split_bottom", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                                                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-        DrawSplitter(false, 6.0f, consoleH, minConsoleH, (float)winH - toolbarH - minGameH, 1.0f);
-        ImGui::End();
+        gameViewInputActive = (gameViewHovered || gameViewFocused) && !(draggingMove || draggingScale || draggingRotate);
 
         SDL_SetRenderTarget(renderer, nullptr);
         SDL_SetRenderDrawColor(renderer, 18, 18, 20, 255);
