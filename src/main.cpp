@@ -7,6 +7,39 @@ class DebugScene;
 std::unique_ptr<IScene> CreateDemoScene();
 std::unique_ptr<IScene> CreateDebugScene();
 
+static void FillDemoMap(Tilemap &map)
+{
+  for (int y = 0; y < map.height; ++y)
+  {
+    for (int x = 0; x < map.width; ++x)
+    {
+      int tileId = 0;
+      bool border = (x == 0 || y == 0 || x == map.width - 1 || y == map.height - 1);
+      if (border)
+        tileId = 3;
+      else if ((x % 9) == 0 || (y % 9) == 0)
+        tileId = 2;
+      else if (((x + y) % 11) == 0)
+        tileId = 1;
+      map.set(x, y, tileId);
+    }
+  }
+}
+
+static void FillDebugMap(Tilemap &map)
+{
+  for (int y = 0; y < map.height; ++y)
+  {
+    for (int x = 0; x < map.width; ++x)
+    {
+      int tileId = ((x + y) % 5);
+      if (x % 7 == 0 || y % 7 == 0)
+        tileId = 4;
+      map.set(x, y, tileId);
+    }
+  }
+}
+
 static void DrawHud(Engine &engine, const Font &font, const char *sceneName)
 {
   const Time &time = engine.time();
@@ -42,6 +75,9 @@ class DemoScene : public IScene
 public:
   void onEnter(Engine &engine) override
   {
+    Tilemap &map = engine.scene().createTilemap(80, 80, 32);
+    FillDemoMap(map);
+
     auto &e = engine.scene().createEntity();
     e.transform.x = 100;
     e.transform.y = 100;
@@ -113,6 +149,9 @@ class DebugScene : public IScene
 public:
   void onEnter(Engine &engine) override
   {
+    Tilemap &map = engine.scene().createTilemap(60, 60, 40);
+    FillDebugMap(map);
+
     auto &e = engine.scene().createEntity();
     e.transform.x = 100;
     e.transform.y = 100;

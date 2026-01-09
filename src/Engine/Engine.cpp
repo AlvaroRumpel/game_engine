@@ -101,7 +101,8 @@ void Engine::run(std::unique_ptr<IScene> startScene)
 
         renderQueue_.clear();
 
-        // RenderSystem coleta comandos do mundo
+        // Tilemap + RenderSystem coleta comandos do mundo
+        tilemapSystem_.render(*this, scene_);
         renderSystem_.render(*this, scene_);
 
         // Scene pode adicionar debug/UI tambem

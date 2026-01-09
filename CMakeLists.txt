@@ -18,7 +18,9 @@ add_executable(game_engine
     src/Time/Time.cpp
     src/Assets/AssetManager.cpp
     src/World/Scene.cpp
+    src/World/Tilemap.cpp
     src/Systems/RenderSystem.cpp
+    src/Systems/TilemapSystem.cpp
     src/Renderer/RenderQueue.cpp
 )
 
